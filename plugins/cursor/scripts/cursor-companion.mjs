@@ -1,0 +1,551 @@
+#!/usr/bin/env node
+
+import path from "node:path";
+import process from "node:process";
+import { fileURLToPath } from "node:url";
+
+import { parseArgs, splitRawArgumentString } from "./lib/args.mjs";
+import {
+  cursorAgentInstallGuidance,
+  getCursorAgentAvailability,
+  getCursorAuthStatus,
+  parseStructuredOutput,
+  resolveReviewModel,
+  runCursorAgent
+} from "./lib/cursor.mjs";
+import { readJsonFile } from "./lib/fs.mjs";
+import { collectReviewContext, ensureGitRepository, resolveReviewTarget } from "./lib/git.mjs";
+import { binaryAvailable, terminateProcessTree } from "./lib/process.mjs";
+import { interpolateTemplate, loadPromptTemplate } from "./lib/prompts.mjs";
+import { generateJobId, upsertJob, writeJobFile } from "./lib/state.mjs";
+import {
+  buildSingleJobSnapshot,
+  buildStatusSnapshot,
+  readStoredJob,
+  resolveCancelableJob,
+  resolveResultJob
+} from "./lib/job-control.mjs";
+import {
+  appendLogLine,
+  createJobLogFile,
+  createJobProgressUpdater,
+  createJobRecord,
+  createProgressReporter,
+  nowIso,
+  runTrackedJob
+} from "./lib/tracked-jobs.mjs";
+import { resolveWorkspaceRoot } from "./lib/workspace.mjs";
+import {
+  renderCancelReport,
+  renderJobStatusReport,
+  renderReviewResult,
+  renderSetupReport,
+  renderStatusReport,
+  renderStoredJobResult
+} from "./lib/render.mjs";
+
+const ROOT_DIR = path.resolve(fileURLToPath(new URL("..", import.meta.url)));
+const REVIEW_SCHEMA_PATH = path.join(ROOT_DIR, "schemas", "review-output.schema.json");
+const DEFAULT_STATUS_WAIT_TIMEOUT_MS = 240000;
+const DEFAULT_STATUS_POLL_INTERVAL_MS = 2000;
+
+function printUsage() {
+  console.log(
+    [
+      "Usage:",
+      "  node scripts/cursor-companion.mjs setup [--json]",
+      "  node scripts/cursor-companion.mjs review [--wait|--background] [--base <ref>] [--scope <auto|working-tree|branch>] [--model <model>] [--resume <chat-id>]",
+      "  node scripts/cursor-companion.mjs adversarial-review [--wait|--background] [--base <ref>] [--scope <auto|working-tree|branch>] [--model <model>] [--resume <chat-id>] [focus text]",
+      "  node scripts/cursor-companion.mjs status [job-id] [--all] [--json] [--wait]",
+      "  node scripts/cursor-companion.mjs result [job-id] [--json]",
+      "  node scripts/cursor-companion.mjs cancel [job-id] [--json]"
+    ].join("\n")
+  );
+}
+
+function outputResult(value, asJson) {
+  if (asJson) {
+    console.log(JSON.stringify(value, null, 2));
+    return;
+  }
+  process.stdout.write(value);
+}
+
+function outputCommandResult(payload, rendered, asJson) {
+  outputResult(asJson ? payload : rendered, asJson);
+}
+
+function normalizeArgv(argv) {
+  if (argv.length === 1) {
+    const [raw] = argv;
+    if (!raw || !raw.trim()) {
+      return [];
+    }
+    return splitRawArgumentString(raw);
+  }
+  return argv;
+}
+
+function parseCommandInput(argv, config = {}) {
+  return parseArgs(normalizeArgv(argv), {
+    ...config,
+    aliasMap: {
+      C: "cwd",
+      ...(config.aliasMap ?? {})
+    }
+  });
+}
+
+function resolveCommandCwd(options = {}) {
+  return options.cwd ? path.resolve(process.cwd(), options.cwd) : process.cwd();
+}
+
+function resolveCommandWorkspace(options = {}) {
+  return resolveWorkspaceRoot(resolveCommandCwd(options));
+}
+
+function sleep(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function firstMeaningfulLine(text, fallback) {
+  const line = String(text ?? "")
+    .split(/\r?\n/)
+    .map((value) => value.trim())
+    .find(Boolean);
+  return line ?? fallback;
+}
+
+function loadReviewSchemaText() {
+  return `${JSON.stringify(readJsonFile(REVIEW_SCHEMA_PATH), null, 2)}\n`;
+}
+
+function appendOutputSchema(prompt) {
+  return `${prompt.trim()}\n\n<output_schema>\nReturn only JSON matching this schema. Do not wrap it in markdown fences. Do not edit files.\n${loadReviewSchemaText()}</output_schema>\n`;
+}
+
+async function buildSetupReport(cwd) {
+  const nodeStatus = binaryAvailable("node", ["--version"], { cwd });
+  const cursorAgent = getCursorAgentAvailability(cwd);
+  const auth = getCursorAuthStatus(cwd);
+  const nextSteps = [];
+
+  if (!nodeStatus.available) {
+    nextSteps.push("Install Node.js 18.18 or later.");
+  }
+  if (!cursorAgent.available) {
+    nextSteps.push(cursorAgentInstallGuidance());
+  }
+  if (cursorAgent.available && !auth.loggedIn) {
+    nextSteps.push("Log in with `cursor-agent login`.");
+    nextSteps.push("For a non-interactive machine, set CURSOR_API_KEY in the environment. Do not put the key on the command line.");
+  }
+  if (nodeStatus.available && cursorAgent.available && auth.loggedIn) {
+    nextSteps.push("Run `/cursor:review` for a read-only review, or `/cursor:adversarial-review` to challenge the design.");
+  }
+
+  return {
+    ready: Boolean(nodeStatus.available && cursorAgent.available && auth.loggedIn),
+    node: nodeStatus,
+    cursorAgent,
+    auth,
+    actionsTaken: [],
+    nextSteps
+  };
+}
+
+async function handleSetup(argv) {
+  const { options } = parseCommandInput(argv, {
+    valueOptions: ["cwd"],
+    booleanOptions: ["json"]
+  });
+  const cwd = resolveCommandCwd(options);
+  const report = await buildSetupReport(cwd);
+  outputResult(options.json ? report : renderSetupReport(report), options.json);
+}
+
+function buildReviewPrompt(context) {
+  const template = loadPromptTemplate(ROOT_DIR, "review");
+  return appendOutputSchema(
+    interpolateTemplate(template, {
+      TARGET_LABEL: context.target.label,
+      REVIEW_COLLECTION_GUIDANCE: context.collectionGuidance,
+      REVIEW_INPUT: context.content
+    })
+  );
+}
+
+function buildAdversarialReviewPrompt(context, focusText) {
+  const template = loadPromptTemplate(ROOT_DIR, "adversarial-review");
+  return appendOutputSchema(
+    interpolateTemplate(template, {
+      REVIEW_KIND: "Adversarial Review",
+      TARGET_LABEL: context.target.label,
+      USER_FOCUS: focusText || "No extra focus provided.",
+      REVIEW_COLLECTION_GUIDANCE: context.collectionGuidance,
+      REVIEW_INPUT: context.content
+    })
+  );
+}
+
+function ensureCursorAgentAvailable(cwd) {
+  const availability = getCursorAgentAvailability(cwd);
+  if (!availability.available) {
+    throw new Error(`cursor-agent is not on PATH. ${cursorAgentInstallGuidance()} Then rerun /cursor:setup.`);
+  }
+}
+
+function validateStandardReviewRequest(focusText) {
+  if (focusText.trim()) {
+    throw new Error(
+      `\`/cursor:review\` does not support custom focus text. Retry with \`/cursor:adversarial-review ${focusText.trim()}\` for focused review instructions.`
+    );
+  }
+}
+
+function isActiveJobStatus(status) {
+  return status === "queued" || status === "running";
+}
+
+async function waitForSingleJobSnapshot(cwd, reference, options = {}) {
+  const timeoutMs = Math.max(0, Number(options.timeoutMs) || DEFAULT_STATUS_WAIT_TIMEOUT_MS);
+  const pollIntervalMs = Math.max(100, Number(options.pollIntervalMs) || DEFAULT_STATUS_POLL_INTERVAL_MS);
+  const deadline = Date.now() + timeoutMs;
+  let snapshot = buildSingleJobSnapshot(cwd, reference);
+
+  while (isActiveJobStatus(snapshot.job.status) && Date.now() < deadline) {
+    await sleep(Math.min(pollIntervalMs, Math.max(0, deadline - Date.now())));
+    snapshot = buildSingleJobSnapshot(cwd, reference);
+  }
+
+  return {
+    ...snapshot,
+    waitTimedOut: isActiveJobStatus(snapshot.job.status),
+    timeoutMs
+  };
+}
+
+async function executeReviewRun(request) {
+  ensureCursorAgentAvailable(request.cwd);
+  ensureGitRepository(request.cwd);
+
+  const target = resolveReviewTarget(request.cwd, {
+    base: request.base,
+    scope: request.scope
+  });
+  const focusText = request.focusText?.trim() ?? "";
+  const reviewName = request.reviewName ?? "Review";
+  if (reviewName === "Review") {
+    validateStandardReviewRequest(focusText);
+  }
+
+  const context = collectReviewContext(request.cwd, target);
+  const prompt =
+    reviewName === "Review" ? buildReviewPrompt(context) : buildAdversarialReviewPrompt(context, focusText);
+  const result = await runCursorAgent(context.repoRoot, {
+    prompt,
+    model: request.model,
+    resume: request.resume,
+    onProgress: request.onProgress
+  });
+
+  const failureMessage = result.errorMessage || result.stderr.trim();
+  if (result.status !== 0) {
+    const summary = firstMeaningfulLine(failureMessage, `${reviewName} failed.`);
+    const rendered = [
+      `# Cursor ${reviewName}`,
+      "",
+      `Target: ${target.label}`,
+      "",
+      summary,
+      ""
+    ].join("\n");
+    return {
+      exitStatus: result.status === 0 ? 1 : result.status,
+      threadId: result.sessionId ?? null,
+      turnId: null,
+      payload: {
+        review: reviewName,
+        target,
+        threadId: result.sessionId ?? null,
+        model: result.model ?? request.model ?? null,
+        cursor: {
+          status: result.status,
+          stderr: result.stderr,
+          stdout: result.text
+        },
+        error: summary
+      },
+      rendered,
+      summary,
+      jobTitle: reviewName === "Review" ? "Cursor Review" : `Cursor ${reviewName}`,
+      jobClass: "review",
+      targetLabel: target.label
+    };
+  }
+
+  const parsed = parseStructuredOutput(result.text, {
+    status: result.status,
+    failureMessage
+  });
+  const payload = {
+    review: reviewName,
+    target,
+    threadId: result.sessionId ?? null,
+    model: result.model ?? request.model ?? null,
+    context: {
+      repoRoot: context.repoRoot,
+      branch: context.branch,
+      summary: context.summary
+    },
+    cursor: {
+      status: result.status,
+      stderr: result.stderr,
+      stdout: result.text
+    },
+    result: parsed.parsed,
+    rawOutput: parsed.rawOutput,
+    parseError: parsed.parseError
+  };
+
+  return {
+    exitStatus: result.status,
+    threadId: result.sessionId ?? null,
+    turnId: null,
+    payload,
+    rendered: renderReviewResult(parsed, {
+      reviewLabel: reviewName,
+      targetLabel: context.target.label
+    }),
+    summary: parsed.parsed?.summary ?? parsed.parseError ?? firstMeaningfulLine(result.text, `${reviewName} finished.`),
+    jobTitle: reviewName === "Review" ? "Cursor Review" : `Cursor ${reviewName}`,
+    jobClass: "review",
+    targetLabel: context.target.label
+  };
+}
+
+function buildReviewJobMetadata(reviewName, target) {
+  return {
+    kind: reviewName === "Adversarial Review" ? "adversarial-review" : "review",
+    title: reviewName === "Review" ? "Cursor Review" : `Cursor ${reviewName}`,
+    summary: `${reviewName} ${target.label}`
+  };
+}
+
+function createCompanionJob({ prefix, kind, title, workspaceRoot, summary }) {
+  return createJobRecord({
+    id: generateJobId(prefix),
+    kind,
+    kindLabel: kind,
+    title,
+    workspaceRoot,
+    jobClass: "review",
+    summary,
+    write: false
+  });
+}
+
+function createTrackedProgress(job, options = {}) {
+  const logFile = options.logFile ?? createJobLogFile(job.workspaceRoot, job.id, job.title);
+  const updateJob = createJobProgressUpdater(job.workspaceRoot, job.id);
+  const progress = createProgressReporter({
+    stderr: Boolean(options.stderr),
+    logFile,
+    onEvent: (event) => {
+      updateJob(event);
+      options.onEvent?.(event);
+    }
+  });
+  return { logFile, progress };
+}
+
+async function runForegroundCommand(job, runner, options = {}) {
+  const { logFile, progress } = createTrackedProgress(job, {
+    logFile: options.logFile,
+    stderr: !options.json
+  });
+  const execution = await runTrackedJob(job, () => runner(progress), { logFile });
+  outputResult(options.json ? execution.payload : execution.rendered, options.json);
+  if (execution.exitStatus !== 0) {
+    process.exitCode = execution.exitStatus;
+  }
+  return execution;
+}
+
+async function handleReviewCommand(argv, config) {
+  const { options, positionals } = parseCommandInput(argv, {
+    valueOptions: ["base", "scope", "model", "cwd", "resume"],
+    booleanOptions: ["json", "background", "wait"],
+    aliasMap: {
+      m: "model"
+    }
+  });
+
+  const cwd = resolveCommandCwd(options);
+  const workspaceRoot = resolveCommandWorkspace(options);
+  ensureCursorAgentAvailable(cwd);
+  const focusText = positionals.join(" ").trim();
+  const target = resolveReviewTarget(cwd, {
+    base: options.base,
+    scope: options.scope
+  });
+  if (config.reviewName === "Review") {
+    validateStandardReviewRequest(focusText);
+  }
+
+  const metadata = buildReviewJobMetadata(config.reviewName, target);
+  const job = createCompanionJob({
+    prefix: "review",
+    kind: metadata.kind,
+    title: metadata.title,
+    workspaceRoot,
+    summary: metadata.summary
+  });
+  await runForegroundCommand(
+    job,
+    (progress) =>
+      executeReviewRun({
+        cwd,
+        base: options.base,
+        scope: options.scope,
+        model: resolveReviewModel(options.model),
+        resume: options.resume ?? null,
+        focusText,
+        reviewName: config.reviewName,
+        onProgress: progress
+      }),
+    { json: options.json }
+  );
+}
+
+async function handleStatus(argv) {
+  const { options, positionals } = parseCommandInput(argv, {
+    valueOptions: ["cwd", "timeout-ms", "poll-interval-ms"],
+    booleanOptions: ["json", "all", "wait"]
+  });
+
+  const cwd = resolveCommandCwd(options);
+  const reference = positionals[0] ?? "";
+  if (reference) {
+    const snapshot = options.wait
+      ? await waitForSingleJobSnapshot(cwd, reference, {
+          timeoutMs: options["timeout-ms"],
+          pollIntervalMs: options["poll-interval-ms"]
+        })
+      : buildSingleJobSnapshot(cwd, reference);
+    outputCommandResult(snapshot, renderJobStatusReport(snapshot.job), options.json);
+    return;
+  }
+
+  if (options.wait) {
+    throw new Error("`status --wait` requires a job id.");
+  }
+
+  const report = buildStatusSnapshot(cwd, { all: options.all });
+  outputResult(options.json ? report : renderStatusReport(report), options.json);
+}
+
+function handleResult(argv) {
+  const { options, positionals } = parseCommandInput(argv, {
+    valueOptions: ["cwd"],
+    booleanOptions: ["json"]
+  });
+
+  const cwd = resolveCommandCwd(options);
+  const reference = positionals[0] ?? "";
+  const { workspaceRoot, job } = resolveResultJob(cwd, reference);
+  const storedJob = readStoredJob(workspaceRoot, job.id);
+  outputCommandResult({ job, storedJob }, renderStoredJobResult(job, storedJob), options.json);
+}
+
+async function handleCancel(argv) {
+  const { options, positionals } = parseCommandInput(argv, {
+    valueOptions: ["cwd"],
+    booleanOptions: ["json"]
+  });
+
+  const cwd = resolveCommandCwd(options);
+  const reference = positionals[0] ?? "";
+  const { workspaceRoot, job } = resolveCancelableJob(cwd, reference, { env: process.env });
+  const existing = readStoredJob(workspaceRoot, job.id) ?? {};
+  const pids = [job.pid, job.agentPid, existing.pid, existing.agentPid];
+  for (const pid of pids) {
+    if (Number.isInteger(pid) && pid > 0) {
+      terminateProcessTree(pid);
+    }
+  }
+  appendLogLine(job.logFile, "Cancelled by user.");
+
+  const completedAt = nowIso();
+  const nextJob = {
+    ...job,
+    status: "cancelled",
+    phase: "cancelled",
+    pid: null,
+    agentPid: null,
+    completedAt,
+    errorMessage: "Cancelled by user."
+  };
+
+  writeJobFile(workspaceRoot, job.id, {
+    ...existing,
+    ...nextJob,
+    cancelledAt: completedAt
+  });
+  upsertJob(workspaceRoot, {
+    id: job.id,
+    status: "cancelled",
+    phase: "cancelled",
+    pid: null,
+    agentPid: null,
+    errorMessage: "Cancelled by user.",
+    completedAt
+  });
+
+  outputCommandResult(
+    {
+      jobId: job.id,
+      status: "cancelled",
+      title: job.title
+    },
+    renderCancelReport(nextJob),
+    options.json
+  );
+}
+
+async function main() {
+  const [subcommand, ...argv] = process.argv.slice(2);
+  if (!subcommand || subcommand === "help" || subcommand === "--help") {
+    printUsage();
+    return;
+  }
+
+  switch (subcommand) {
+    case "setup":
+      await handleSetup(argv);
+      break;
+    case "review":
+      await handleReviewCommand(argv, { reviewName: "Review" });
+      break;
+    case "adversarial-review":
+      await handleReviewCommand(argv, { reviewName: "Adversarial Review" });
+      break;
+    case "status":
+      await handleStatus(argv);
+      break;
+    case "result":
+      handleResult(argv);
+      break;
+    case "cancel":
+      await handleCancel(argv);
+      break;
+    default:
+      throw new Error(`Unknown subcommand: ${subcommand}`);
+  }
+}
+
+main().catch((error) => {
+  const message = error instanceof Error ? error.message : String(error);
+  process.stderr.write(`${message}\n`);
+  process.exitCode = 1;
+});

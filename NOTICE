@@ -11,3 +11,16 @@ distributed under the License is distributed on an "AS IS" BASIS,
 WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 See the License for the specific language governing permissions and
 limitations under the License.
+
+This product is a modified fork of openai/codex-plugin-cc
+(https://github.com/openai/codex-plugin-cc) at commit
+db52e28f4d9ded852ab3942cea316258ae4ef346, licensed under the Apache
+License, Version 2.0.
+
+Modifications: the Codex app-server transport (codex app-server JSON-RPC,
+the broker, and the generated TypeScript client) was replaced with a
+runner that spawns the Cursor CLI `cursor-agent` in non-interactive ask
+mode. The plugin and command namespace were renamed from `codex` to
+`cursor`. Codex-only commands and assets were removed: rescue, transfer,
+the codex-rescue agent, Claude session transfer, the stop-review gate,
+and the gpt-5-4-prompting skill.

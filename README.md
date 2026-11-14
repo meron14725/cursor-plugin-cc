@@ -1,320 +1,139 @@
-# Codex plugin for Claude Code
+# Cursor plugin for Claude Code
 
-Use Codex from inside Claude Code for code reviews or to delegate tasks to Codex.
+Use Cursor CLI (`cursor-agent`) from inside Claude Code for a read-only code review or an adversarial review.
 
-This plugin is for Claude Code users who want an easy way to start using Codex from the workflow
-they already have.
+This repository is a modified fork of [openai/codex-plugin-cc](https://github.com/openai/codex-plugin-cc) at commit `db52e28f4d9ded852ab3942cea316258ae4ef346` (Apache-2.0). The Codex app-server transport was replaced with `cursor-agent`. Rescue, transfer, the stop-review gate, and the GPT-5.4 prompting skill were removed. See `NOTICE` for the license statement.
 
-<video src="./docs/plugin-demo.webm" controls muted playsinline autoplay></video>
+## What you get
 
-## What You Get
+- `/cursor:review` for a read-only review of the working tree or a branch
+- `/cursor:adversarial-review` for a steerable challenge review
+- `/cursor:status`, `/cursor:result`, and `/cursor:cancel` to inspect and stop background runs
+- `/cursor:setup` to check that Cursor CLI is installed and logged in
 
-- `/codex:review` for a normal read-only Codex review
-- `/codex:adversarial-review` for a steerable challenge review
-- `/codex:rescue`, `/codex:transfer`, `/codex:status`, `/codex:result`, and `/codex:cancel` to delegate work, hand off sessions, and manage background jobs
+Reviews always run `cursor-agent` in [ask mode](https://cursor.com/docs/cli/reference/parameters) (`--mode ask`) with `--print` and `--output-format stream-json`. They do not pass `--force`, so the review is not allowed to edit files.
 
 ## Requirements
 
-- **ChatGPT subscription (incl. Free) or OpenAI API key.**
-  - Usage will contribute to your Codex usage limits. [Learn more](https://developers.openai.com/codex/pricing).
+- **Cursor CLI installed and logged in.** The installer links both `cursor-agent` and `agent` to the same binary. This plugin calls `cursor-agent`.
 - **Node.js 18.18 or later**
+- **Git**, in the repository you want reviewed
+
+Install Cursor CLI:
+
+```bash
+curl https://cursor.com/install -fsS | bash
+```
+
+Add `~/.local/bin` to your `PATH` if the installer did not already do that. Then log in:
+
+```bash
+cursor-agent login
+cursor-agent status
+```
+
+For a machine without a browser, set `CURSOR_API_KEY` in the environment. Do not pass the key as a command-line flag. Check status with `cursor-agent status` (add `--format json` for a machine-readable result).
 
 ## Install
 
-Add the marketplace in Claude Code:
+In Claude Code:
 
-```bash
-/plugin marketplace add openai/codex-plugin-cc
-```
-
-Install the plugin:
-
-```bash
-/plugin install codex@openai-codex
-```
-
-Reload plugins:
-
-```bash
+```text
+/plugin marketplace add meron14725/cursor-plugin-cc
+/plugin install cursor@cursor-plugin-cc
 /reload-plugins
+/cursor:setup
 ```
 
-Then run:
-
-```bash
-/codex:setup
-```
-
-`/codex:setup` will tell you whether Codex is ready. If Codex is missing and npm is available, it can offer to install Codex for you.
-
-If you prefer to install Codex yourself, use:
-
-```bash
-npm install -g @openai/codex
-```
-
-If Codex is installed but not logged in yet, run:
-
-```bash
-!codex login
-```
-
-After install, you should see:
-
-- the slash commands listed below
-- the `codex:codex-rescue` subagent in `/agents`
-
-One simple first run is:
-
-```bash
-/codex:review --background
-/codex:status
-/codex:result
-```
+`/cursor:setup` reports whether `cursor-agent` is on `PATH` and whether `cursor-agent status` says you are logged in. It prints the install or login command when something is missing. It does not install the CLI for you.
 
 ## Usage
 
-### `/codex:review`
+### `/cursor:review`
 
-Runs a normal Codex review on your current work. It gives you the same quality of code review as running `/review` inside Codex directly.
+Read-only review of the current work. It does not take extra focus text.
 
-> [!NOTE]
-> Code review especially for multi-file changes might take a while. It's generally recommended to run it in the background.
-
-Use it when you want:
-
-- a review of your current uncommitted changes
-- a review of your branch compared to a base branch like `main`
-
-Use `--base <ref>` for branch review. It also supports `--wait` and `--background`. It is not steerable and does not take custom focus text. Use [`/codex:adversarial-review`](#codexadversarial-review) when you want to challenge a specific decision or risk area.
-
-Examples:
-
-```bash
-/codex:review
-/codex:review --base main
-/codex:review --background
+```text
+/cursor:review
+/cursor:review --base main
+/cursor:review --background
+/cursor:review --model composer-2.5
 ```
 
-This command is read-only and will not perform any changes. When run in the background you can use [`/codex:status`](#codexstatus) to check on the progress and [`/codex:cancel`](#codexcancel) to cancel the ongoing task.
+Target selection:
 
-### `/codex:adversarial-review`
+- dirty working tree: review uncommitted changes, including untracked files
+- clean tree: review the branch against the detected default branch
+- `--base <ref>`: review the branch against that ref
+- `--scope working-tree` or `--scope branch` to force a target
+- `--scope staged` and `--scope unstaged` are rejected
 
-Runs a **steerable** review that questions the chosen implementation and design.
+`--wait` runs in the foreground. `--background` asks Claude Code to detach the run. Check `/cursor:status` and read `/cursor:result` when it finishes. `--resume <chat-id>` continues an existing Cursor chat.
 
-It can be used to pressure-test assumptions, tradeoffs, failure modes, and whether a different approach would have been safer or simpler.
+When `--model` is omitted, the plugin does not pass `--model`, so Cursor CLI uses the account's selected model. Set `CURSOR_AGENT_MODEL` to change that default without hardcoding it into the plugin. List models with `cursor-agent --list-models` or `cursor-agent models`.
 
-It uses the same review target selection as `/codex:review`, including `--base <ref>` for branch review.
-It also supports `--wait` and `--background`. Unlike `/codex:review`, it can take extra focus text after the flags.
+### `/cursor:adversarial-review`
 
-Use it when you want:
+Same target selection as `/cursor:review`, plus optional focus text. The prompt is the adversarial review in `plugins/cursor/prompts/adversarial-review.md`, and the answer is parsed against `plugins/cursor/schemas/review-output.schema.json`.
 
-- a review before shipping that challenges the direction, not just the code details
-- review focused on design choices, tradeoffs, hidden assumptions, and alternative approaches
-- pressure-testing around specific risk areas like auth, data loss, rollback, race conditions, or reliability
-
-Examples:
-
-```bash
-/codex:adversarial-review
-/codex:adversarial-review --base main challenge whether this was the right caching and retry design
-/codex:adversarial-review --background look for race conditions and question the chosen approach
+```text
+/cursor:adversarial-review
+/cursor:adversarial-review --base main challenge whether this was the right caching and retry design
+/cursor:adversarial-review --background look for race conditions and question the chosen approach
 ```
 
 This command is read-only. It does not fix code.
 
-### `/codex:rescue`
+### `/cursor:status`
 
-Hands a task to Codex through the `codex:codex-rescue` subagent.
-
-Use it when you want Codex to:
-
-- investigate a bug
-- try a fix
-- continue a previous Codex task
-- take a faster or cheaper pass with a smaller model
-
-> [!NOTE]
-> Depending on the task and the model you choose these tasks might take a long time and it's generally recommended to force the task to be in the background or move the agent to the background.
-
-It supports `--background`, `--wait`, `--resume`, and `--fresh`. If you omit `--resume` and `--fresh`, the plugin can offer to continue the latest rescue thread for this repo.
-
-Examples:
-
-```bash
-/codex:rescue investigate why the tests started failing
-/codex:rescue fix the failing test with the smallest safe patch
-/codex:rescue --resume apply the top fix from the last run
-/codex:rescue --model gpt-5.4-mini --effort medium investigate the flaky integration test
-/codex:rescue --model spark fix the issue quickly
-/codex:rescue --background investigate the regression
-```
-
-You can also just ask for a task to be delegated to Codex:
+Shows running and recent Cursor review jobs for this repository and Claude session.
 
 ```text
-Ask Codex to redesign the database connection to be more resilient.
+/cursor:status
+/cursor:status review-abc123
 ```
 
-**Notes:**
+### `/cursor:result`
 
-- if you do not pass `--model` or `--effort`, Codex chooses its own defaults.
-- if you say `spark`, the plugin maps that to `gpt-5.3-codex-spark`
-- follow-up rescue requests can continue the latest Codex task in the repo
+Shows the stored review for a finished job, including the Cursor session id and a `cursor-agent --resume <chat-id>` command when the CLI returned one.
 
-### `/codex:transfer`
-
-Creates a persistent Codex thread from the current Claude Code session and prints a `codex resume <session-id>` command.
-
-Use it when you started a debugging or implementation conversation in Claude Code and want to continue that same context directly in Codex.
-
-Examples:
-
-```bash
-/codex:transfer
-/codex:transfer --source ~/.claude/projects/-Users-me-repo/<session-id>.jsonl
+```text
+/cursor:result
+/cursor:result review-abc123
 ```
 
-The plugin's existing `SessionStart` hook supplies the current transcript path automatically; `--source` is available as a manual override. The transfer uses Codex's external-agent session importer, so it follows the same conversion rules as importing Claude history in the Codex App and creates visible turns that can be continued in the App or TUI. The source must be under `~/.claude/projects`, and older Codex versions that do not expose session import must be upgraded before using this command.
+### `/cursor:cancel`
 
-### `/codex:status`
+Stops an active background review by signaling the companion process and the `cursor-agent` child.
 
-Shows running and recent Codex jobs for the current repository.
-
-Examples:
-
-```bash
-/codex:status
-/codex:status task-abc123
+```text
+/cursor:cancel
+/cursor:cancel review-abc123
 ```
 
-Use it to:
+### `/cursor:setup`
 
-- check progress on background work
-- see the latest completed job
-- confirm whether a task is still running
-
-### `/codex:result`
-
-Shows the final stored Codex output for a finished job.
-When available, it also includes the Codex session ID so you can reopen that run directly in Codex with `codex resume <session-id>`.
-
-Examples:
-
-```bash
-/codex:result
-/codex:result task-abc123
+```text
+/cursor:setup
 ```
 
-### `/codex:cancel`
+## How a review runs
 
-Cancels an active background Codex job.
+1. The plugin selects the git target (working tree, branch, or `--base`).
+2. It builds a prompt from the review template, the diff (or a short summary when the diff is large), and the review JSON schema.
+3. It spawns `cursor-agent -p --output-format stream-json --mode ask --trust --workspace <repo>`.
+4. `--model` is added only when you passed `--model` or set `CURSOR_AGENT_MODEL`.
+5. If the stream reports a write tool, the plugin stops the process and marks the review failed.
 
-Examples:
+`--trust` only skips Cursor's headless workspace-trust prompt. It is not permission to edit. Ask mode is what keeps the review read-only.
 
-```bash
-/codex:cancel
-/codex:cancel task-abc123
-```
+## Fork
 
-### `/codex:setup`
+Upstream: https://github.com/openai/codex-plugin-cc (`db52e28f4d9ded852ab3942cea316258ae4ef346`).
 
-Checks whether Codex is installed and authenticated.
-If Codex is missing and npm is available, it can offer to install Codex for you.
+What changed:
 
-You can also use `/codex:setup` to manage the optional review gate.
-
-#### Enabling review gate
-
-```bash
-/codex:setup --enable-review-gate
-/codex:setup --disable-review-gate
-```
-
-When the review gate is enabled, the plugin uses a `Stop` hook to run a targeted Codex review based on Claude's response. If that review finds issues, the stop is blocked so Claude can address them first.
-
-> [!WARNING]
-> The review gate can create a long-running Claude/Codex loop and may drain usage limits quickly. Only enable it when you plan to actively monitor the session.
-
-## Typical Flows
-
-### Review Before Shipping
-
-```bash
-/codex:review
-```
-
-### Hand A Problem To Codex
-
-```bash
-/codex:rescue investigate why the build is failing in CI
-```
-
-### Start Something Long-Running
-
-```bash
-/codex:adversarial-review --background
-/codex:rescue --background investigate the flaky test
-```
-
-Then check in with:
-
-```bash
-/codex:status
-/codex:result
-```
-
-## Codex Integration
-
-The Codex plugin wraps the [Codex app server](https://developers.openai.com/codex/app-server). It uses the global `codex` binary installed in your environment and [applies the same configuration](https://developers.openai.com/codex/config-basic).
-
-### Common Configurations
-
-If you want to change the default reasoning effort or the default model that gets used by the plugin, you can define that inside your user-level or project-level `config.toml`. For example to always use `gpt-5.4-mini` on `high` for a specific project you can add the following to a `.codex/config.toml` file at the root of the directory you started Claude in:
-
-```toml
-model = "gpt-5.4-mini"
-model_reasoning_effort = "high"
-```
-
-Your configuration will be picked up based on:
-
-- user-level config in `~/.codex/config.toml`
-- project-level overrides in `.codex/config.toml`
-- project-level overrides only load when the [project is trusted](https://developers.openai.com/codex/config-advanced#project-config-files-codexconfigtoml)
-
-Check out the Codex docs for more [configuration options](https://developers.openai.com/codex/config-reference).
-
-### Moving The Work Over To Codex
-
-Delegated tasks and any [stop gate](#what-does-the-review-gate-do) run can also be directly resumed inside Codex by running `codex resume` either with the specific session ID you received from running `/codex:result` or `/codex:status` or by selecting it from the list.
-
-This way you can review the Codex work or continue the work there.
-
-## FAQ
-
-### Do I need a separate Codex account for this plugin?
-
-If you are already signed into Codex on this machine, that account should work immediately here too. This plugin uses your local Codex CLI authentication.
-
-If you only use Claude Code today and have not used Codex yet, you will also need to sign in to Codex with either a ChatGPT account or an API key. [Codex is available with your ChatGPT subscription](https://developers.openai.com/codex/pricing/), and [`codex login`](https://developers.openai.com/codex/cli/reference/#codex-login) supports both ChatGPT and API key sign-in. Run `/codex:setup` to check whether Codex is ready, and use `!codex login` if it is not.
-
-### Does the plugin use a separate Codex runtime?
-
-No. This plugin delegates through your local [Codex CLI](https://developers.openai.com/codex/cli/) and [Codex app server](https://developers.openai.com/codex/app-server/) on the same machine.
-
-That means:
-
-- it uses the same Codex install you would use directly
-- it uses the same local authentication state
-- it uses the same repository checkout and machine-local environment
-
-### Will it use the same Codex config I already have?
-
-Yes. If you already use Codex, the plugin picks up the same [configuration](#common-configurations).
-
-### Can I keep using my current API key or base URL setup?
-
-Yes. Because the plugin uses your local Codex CLI, your existing sign-in method and config still apply.
-
-If you need to point the built-in OpenAI provider at a different endpoint, set `openai_base_url` in your [Codex config](https://developers.openai.com/codex/config-advanced/#config-and-state-locations).
+- Codex app-server JSON-RPC, the broker, and the generated TypeScript client were removed.
+- Reviews call `cursor-agent` instead.
+- The plugin namespace is `cursor` (`/cursor:review`, `/cursor:adversarial-review`).
+- Removed: `/codex:rescue`, `/codex:transfer`, the rescue subagent, Claude session transfer, the stop-review gate, and the `gpt-5-4-prompting` skill.
