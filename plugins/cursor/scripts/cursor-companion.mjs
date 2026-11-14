@@ -1,5 +1,6 @@
 #!/usr/bin/env node
 
+import os from "node:os";
 import path from "node:path";
 import process from "node:process";
 import { fileURLToPath } from "node:url";
@@ -19,8 +20,10 @@ import { binaryAvailable, stopProcessTree } from "./lib/process.mjs";
 import { interpolateTemplate, loadPromptTemplate } from "./lib/prompts.mjs";
 import {
   cleanupSnapshotPath,
+  clearReviewJob,
   createIsolatedReviewWorkspace,
   installSnapshotSignalHandlers,
+  registerReviewJob,
   trackSnapshot,
   untrackSnapshot,
   writeReviewContextFiles
@@ -252,17 +255,19 @@ async function executeReviewRun(request) {
     validateStandardReviewRequest(focusText);
   }
 
+  registerReviewJob({ workspaceRoot: request.workspaceRoot, jobId: request.jobId });
   const context = collectReviewContext(request.cwd, target);
   const prompt =
     reviewName === "Review" ? buildReviewPrompt(context) : buildAdversarialReviewPrompt(context, focusText);
   const isolated = await createIsolatedReviewWorkspace(context.repoRoot, {
     syncWorkingTree: target.mode === "working-tree"
   });
-  trackSnapshot(isolated.root);
+  trackSnapshot(isolated.root, os.tmpdir());
   request.onProgress?.({
     message: "Review snapshot ready.",
     phase: "reviewing",
-    snapshotPath: isolated.root
+    snapshotPath: isolated.root,
+    snapshotTmp: os.tmpdir()
   });
   let result;
   try {
@@ -277,6 +282,7 @@ async function executeReviewRun(request) {
   } finally {
     isolated.cleanup();
     untrackSnapshot(isolated.root);
+    clearReviewJob();
   }
 
   const failureMessage = result.errorMessage || result.stderr.trim();
@@ -442,7 +448,9 @@ async function handleReviewCommand(argv, config) {
         resume: options.resume ?? null,
         focusText,
         reviewName: config.reviewName,
-        onProgress: progress
+        onProgress: progress,
+        workspaceRoot,
+        jobId: job.id
       }),
     { json: options.json }
   );

@@ -1,5 +1,6 @@
 import { spawn } from "node:child_process";
 
+import { registerAgent, unregisterAgent } from "./review-workspace.mjs";
 import { binaryAvailable, runCommand } from "./process.mjs";
 
 export const CURSOR_AGENT_BIN = "cursor-agent";
@@ -364,6 +365,7 @@ export function runCursorAgent(cwd, options = {}) {
       windowsHide: true
     });
 
+    registerAgent(child.pid);
     options.onProgress?.({
       message: "Cursor review running in ask mode.",
       phase: "reviewing",
@@ -427,6 +429,7 @@ export function runCursorAgent(cwd, options = {}) {
       reject(error);
     });
     child.on("close", (code, signal) => {
+      unregisterAgent(child.pid);
       const parsed = parseCursorAgentOutput(stdout);
       const fresh = parsed.progress.slice(emittedProgress);
       for (const line of fresh) {

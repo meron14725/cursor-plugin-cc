@@ -120,14 +120,14 @@ Stops an active background review by signaling the companion process and the `cu
 ## How a review runs
 
 1. The plugin selects the git target (working tree, branch, or `--base`).
-2. It materializes a temporary directory with `git archive` of `HEAD` when a commit exists, then copies dirty and untracked files in without following symlinks. A repository with no commits is copied from the untracked files alone.
+2. It materializes a temporary directory with `git read-tree` and `git checkout-index` into a private index, with hooks disabled, so export attributes do not change the files. Dirty and untracked files are copied in without following symlinks. Symlinks that point outside the snapshot are replaced with markers. A repository with no commits is copied from the untracked files alone.
 3. It writes the full diff, in chunks, to a `context/` directory next to that tree. Those files are outside the reviewed tree. The prompt lists their absolute paths and says they are plugin-generated.
 4. It spawns `cursor-agent -p --output-format stream-json --mode ask --trust --workspace <snapshot>`.
 5. `--model` is added only when you passed `--model` or set `CURSOR_AGENT_MODEL`.
 6. Read and search tools are allowed. A write, shell, MCP, task, or unnamed tool call fails the review. The plugin signals the process group with `SIGTERM` and then `SIGKILL`. Tool lines are written to the job log as they arrive. Use `/cursor:status <job-id>` to see them.
 7. The snapshot path is stored on the job and removed on completion, cancel, `SIGTERM`, `SIGINT`, and session end.
 
-`--trust` only skips Cursor's headless workspace-trust prompt. It is not permission to edit. Ask mode is requested because the docs describe it as read-only, but print mode is separately documented as able to edit the workspace without `--force`. The isolated worktree and the tool block are what keep the review off your checkout.
+`--trust` only skips Cursor's headless workspace-trust prompt. It is not permission to edit. Ask mode is requested because the docs describe it as read-only, but print mode is separately documented as able to edit the workspace without `--force`. The snapshot directory and the tool block are what keep the review off your checkout.
 
 ## Fork
 

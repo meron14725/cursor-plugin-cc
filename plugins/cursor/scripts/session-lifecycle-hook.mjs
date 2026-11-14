@@ -6,7 +6,7 @@ import process from "node:process";
 import { stopProcessTree } from "./lib/process.mjs";
 import { cleanupSnapshotPath } from "./lib/review-workspace.mjs";
 import { loadState, resolveStateFile, saveState } from "./lib/state.mjs";
-import { SESSION_ID_ENV } from "./lib/tracked-jobs.mjs";
+import { SESSION_ID_ENV, appendLogLine } from "./lib/tracked-jobs.mjs";
 import { resolveWorkspaceRoot } from "./lib/workspace.mjs";
 
 const PLUGIN_DATA_ENV = "CLAUDE_PLUGIN_DATA";
@@ -48,17 +48,18 @@ async function cleanupSessionJobs(cwd, sessionId) {
   }
 
   for (const job of removedJobs) {
-    cleanupSnapshotPath(job.snapshotPath);
     const stillRunning = job.status === "queued" || job.status === "running";
-    if (!stillRunning) {
-      continue;
-    }
-    for (const pid of [job.pid, job.agentPid]) {
+    if (stillRunning) {
       try {
-        await stopProcessTree(pid);
+        await stopProcessTree(job.agentPid);
+        await stopProcessTree(job.pid);
       } catch {
         // Ignore teardown failures during session shutdown.
       }
+    }
+    const removed = cleanupSnapshotPath(job.snapshotPath, job.snapshotTmp);
+    if (job.snapshotPath && !removed && fs.existsSync(job.snapshotPath)) {
+      appendLogLine(job.logFile, `Snapshot cleanup refused for ${job.snapshotPath}.`);
     }
   }
 

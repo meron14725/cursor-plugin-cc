@@ -123,6 +123,125 @@ test("snapshot creation does not run a post-checkout hook", async () => {
   assert.equal(fs.existsSync(path.join(repo, "hook-ran")), false);
 });
 
+test("checkout keeps export-ignore files and does not expand export-subst", async () => {
+  const repo = makeTempDir();
+  initGitRepo(repo);
+  fs.writeFileSync(path.join(repo, "secret.txt"), "KEEP-SECRET\n");
+  fs.writeFileSync(path.join(repo, "version.txt"), "literal $Format:%H$\n");
+  fs.writeFileSync(path.join(repo, ".gitattributes"), "secret.txt export-ignore\nversion.txt export-subst\n");
+  commitAll(repo, "attrs");
+
+  const isolated = await createIsolatedReviewWorkspace(repo);
+  try {
+    assert.equal(fs.readFileSync(path.join(isolated.path, "secret.txt"), "utf8"), "KEEP-SECRET\n");
+    assert.match(fs.readFileSync(path.join(isolated.path, "version.txt"), "utf8"), /\$Format:%H\$/);
+  } finally {
+    isolated.cleanup();
+  }
+});
+
+test("a populated submodule is copied and an empty submodule fails the snapshot", async () => {
+  const sub = makeTempDir();
+  initGitRepo(sub);
+  fs.writeFileSync(path.join(sub, "inside.js"), "export const inside = true;\n");
+  commitAll(sub, "sub");
+  const subSha = run("git", ["rev-parse", "HEAD"], { cwd: sub }).stdout.trim();
+
+  const populated = makeTempDir();
+  initGitRepo(populated);
+  fs.writeFileSync(path.join(populated, "README.md"), "parent\n");
+  commitAll(populated, "init");
+  run("git", ["clone", sub, path.join(populated, "vendor", "lib")], { cwd: populated });
+  run("git", ["update-index", "--add", "--cacheinfo", `160000,${subSha},vendor/lib`], { cwd: populated });
+  run("git", ["commit", "-m", "link"], { cwd: populated });
+
+  const isolated = await createIsolatedReviewWorkspace(populated);
+  try {
+    assert.match(fs.readFileSync(path.join(isolated.path, "vendor", "lib", "inside.js"), "utf8"), /inside = true/);
+  } finally {
+    isolated.cleanup();
+  }
+
+  const empty = makeTempDir();
+  initGitRepo(empty);
+  fs.writeFileSync(path.join(empty, "README.md"), "parent\n");
+  commitAll(empty, "init");
+  run("git", ["update-index", "--add", "--cacheinfo", `160000,${subSha},vendor/lib`], { cwd: empty });
+  run("git", ["commit", "-m", "link"], { cwd: empty });
+  await assert.rejects(() => createIsolatedReviewWorkspace(empty), /Submodule vendor\/lib is not checked out/);
+});
+
+test("an external diff driver does not replace the review diff", async () => {
+  const repo = makeTempDir();
+  initGitRepo(repo);
+  fs.writeFileSync(path.join(repo, "app.js"), "export const value = 1;\n");
+  commitAll(repo, "init");
+  const marker = path.join(repo, "ext-ran");
+  const script = path.join(repo, "ext.sh");
+  fs.writeFileSync(script, `#!/bin/sh\necho ran >> ${JSON.stringify(marker)}\necho FAKE-EXTERNAL-DIFF\n`, { mode: 0o755 });
+  run("git", ["config", "diff.external", script], { cwd: repo });
+  fs.writeFileSync(path.join(repo, "app.js"), "export const value = REAL-DIFF-BODY;\n");
+
+  const contextDir = path.join(repo, "context-out");
+  const written = await writeReviewContextFiles(repo, { mode: "working-tree" }, contextDir);
+  const body = written.chunks.map((filePath) => fs.readFileSync(filePath, "utf8")).join("\n");
+  assert.equal(fs.existsSync(marker), false);
+  assert.doesNotMatch(body, /FAKE-EXTERNAL-DIFF/);
+  assert.match(body, /REAL-DIFF-BODY/);
+});
+
+test("a committed symlink to an outside file becomes a marker and its target is not read", async () => {
+  const outside = path.join(os.tmpdir(), `cursor-review-target-${process.pid}-${Date.now()}`);
+  fs.writeFileSync(outside, "SECRET-LINK-TARGET");
+  const repo = makeTempDir();
+  initGitRepo(repo);
+  fs.symlinkSync(outside, path.join(repo, "linked.js"));
+  commitAll(repo, "link");
+
+  const isolated = await createIsolatedReviewWorkspace(repo);
+  try {
+    const snapshotFile = path.join(isolated.path, "linked.js");
+    assert.equal(fs.lstatSync(snapshotFile).isSymbolicLink(), false);
+    assert.match(fs.readFileSync(snapshotFile, "utf8"), /points outside the snapshot/);
+    assert.equal(fs.readFileSync(outside, "utf8"), "SECRET-LINK-TARGET");
+  } finally {
+    isolated.cleanup();
+    fs.rmSync(outside, { force: true });
+  }
+});
+
+test("committed files over the byte cap are replaced with a marker", async () => {
+  const repo = makeTempDir();
+  initGitRepo(repo);
+  fs.writeFileSync(path.join(repo, "big.js"), `${"y".repeat(80)}\n`);
+  commitAll(repo, "big");
+
+  const isolated = await createIsolatedReviewWorkspace(repo, { maxFileBytes: 16 });
+  try {
+    const body = fs.readFileSync(path.join(isolated.path, "big.js"), "utf8");
+    assert.match(body, /cursor-review skipped/);
+    assert.doesNotMatch(body, /yyyy/);
+  } finally {
+    isolated.cleanup();
+  }
+});
+
+test("diff chunks break on newlines", async () => {
+  const repo = makeTempDir();
+  initGitRepo(repo);
+  fs.writeFileSync(path.join(repo, "app.js"), "export const value = 1;\n");
+  commitAll(repo, "init");
+  fs.writeFileSync(path.join(repo, "app.js"), `export const value = "${"x".repeat(200)}";\n`);
+  const written = await writeReviewContextFiles(repo, { mode: "working-tree" }, path.join(repo, "chunks"), {
+    chunkBytes: 40
+  });
+  const diffFiles = written.chunks.filter((filePath) => path.basename(filePath).startsWith("diff-"));
+  assert.ok(diffFiles.length > 1);
+  for (const filePath of diffFiles) {
+    assert.equal(fs.readFileSync(filePath).at(-1), 0x0a);
+  }
+});
+
 test("review context is chunked outside the tree and is not dropped", async () => {
   const repo = makeTempDir();
   initGitRepo(repo);

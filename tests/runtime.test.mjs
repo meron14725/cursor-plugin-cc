@@ -6,7 +6,7 @@ import { spawn } from "node:child_process";
 import { fileURLToPath } from "node:url";
 
 import { buildEnv, installFakeCursorAgent, readFakeState } from "./fake-cursor-agent-fixture.mjs";
-import { initGitRepo, makeTempDir, run } from "./helpers.mjs";
+import { initGitRepo, makeTempDir, run, writeExecutable } from "./helpers.mjs";
 import { resolveStateDir } from "../plugins/cursor/scripts/lib/state.mjs";
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
@@ -602,11 +602,67 @@ test("SIGTERM removes the review snapshot", { timeout: 15000 }, async (t) => {
   assert.equal(fs.existsSync(running.snapshotPath), true);
   process.kill(child.pid, "SIGTERM");
   await waitFor(() => fs.existsSync(running.snapshotPath) === false);
-  try {
-    process.kill(running.agentPid, "SIGKILL");
-  } catch {
-    // The agent exited with the review.
-  }
+  await waitFor(() => {
+    try {
+      process.kill(running.agentPid, 0);
+      return false;
+    } catch (error) {
+      return error?.code === "ESRCH";
+    }
+  });
+  const state = JSON.parse(fs.readFileSync(path.join(resolveStateDir(repo), "state.json"), "utf8"));
+  assert.equal(state.jobs.find((job) => job.id === running.id).status, "cancelled");
+});
+
+test("SIGTERM during snapshot creation deletes the directory and cancels the job", { timeout: 15000 }, async (t) => {
+  const repo = prepareRepo();
+  const binDir = makeTempDir();
+  const ready = path.join(binDir, "git-ready");
+  const realGit = run("which", ["git"], { cwd: repo }).stdout.trim().split("\n").pop();
+  writeExecutable(
+    path.join(binDir, "git"),
+    `#!/usr/bin/env node
+const { spawnSync } = require("node:child_process");
+const fs = require("node:fs");
+const args = process.argv.slice(2);
+if (args.includes("read-tree")) {
+  fs.writeFileSync(process.env.FAKE_GIT_READY, process.env.GIT_INDEX_FILE || "");
+  setInterval(() => {}, 1000);
+} else {
+  const result = spawnSync(${JSON.stringify(realGit)}, args, { stdio: "inherit", env: process.env });
+  process.exit(result.status ?? 1);
+}
+`
+  );
+  installFakeCursorAgent(binDir, "sleep");
+  const child = spawn(process.execPath, [SCRIPT, "review"], {
+    cwd: repo,
+    env: buildEnv(binDir, { FAKE_GIT_READY: ready, REAL_GIT: realGit }),
+    detached: true,
+    stdio: "ignore"
+  });
+  child.unref();
+  t.after(() => {
+    try {
+      process.kill(-child.pid, "SIGKILL");
+    } catch {
+      try {
+        process.kill(child.pid, "SIGKILL");
+      } catch {
+        // Already gone.
+      }
+    }
+  });
+
+  const indexPath = await waitFor(() => (fs.existsSync(ready) ? fs.readFileSync(ready, "utf8") : ""));
+  const snapshot = path.dirname(indexPath);
+  assert.match(path.basename(snapshot), /^cursor-review-/);
+  process.kill(child.pid, "SIGTERM");
+  await waitFor(() => fs.existsSync(snapshot) === false);
+  await waitFor(() => {
+    const state = JSON.parse(fs.readFileSync(path.join(resolveStateDir(repo), "state.json"), "utf8"));
+    return state.jobs.some((job) => job.status === "cancelled");
+  });
 });
 
 test("cancel stops a review whose companion is not a process-group leader", { timeout: 15000 }, async (t) => {

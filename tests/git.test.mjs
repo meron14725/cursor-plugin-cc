@@ -1,4 +1,5 @@
 import fs from "node:fs";
+import os from "node:os";
 import path from "node:path";
 import test from "node:test";
 import assert from "node:assert/strict";
@@ -145,7 +146,24 @@ test("collectReviewContext skips broken untracked symlinks instead of crashing",
 
   assert.equal(target.mode, "working-tree");
   assert.match(context.content, /### broken-link/);
-  assert.match(context.content, /skipped: broken symlink or unreadable file/i);
+  assert.match(context.content, /skipped: symlink/i);
+});
+
+test("collectReviewContext does not read an untracked symlink target", () => {
+  const cwd = makeTempDir();
+  const outside = path.join(os.tmpdir(), `cursor-review-outside-${process.pid}`);
+  fs.writeFileSync(outside, "SECRET-OUTSIDE-BYTES");
+  initGitRepo(cwd);
+  fs.writeFileSync(path.join(cwd, "app.js"), "console.log('v1');\n");
+  run("git", ["add", "app.js"], { cwd });
+  run("git", ["commit", "-m", "init"], { cwd });
+  fs.symlinkSync(outside, path.join(cwd, "linked.js"));
+
+  const context = collectReviewContext(cwd, resolveReviewTarget(cwd, {}));
+  assert.match(context.content, /skipped: symlink/i);
+  assert.doesNotMatch(context.content, /SECRET-OUTSIDE-BYTES/);
+  assert.equal(fs.readFileSync(outside, "utf8"), "SECRET-OUTSIDE-BYTES");
+  fs.rmSync(outside, { force: true });
 });
 
 test("collectReviewContext falls back to lightweight context for larger adversarial reviews", () => {
