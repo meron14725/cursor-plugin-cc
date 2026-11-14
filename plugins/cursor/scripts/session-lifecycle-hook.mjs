@@ -3,7 +3,8 @@
 import fs from "node:fs";
 import process from "node:process";
 
-import { terminateProcessTree } from "./lib/process.mjs";
+import { stopProcessTree } from "./lib/process.mjs";
+import { cleanupSnapshotPath } from "./lib/review-workspace.mjs";
 import { loadState, resolveStateFile, saveState } from "./lib/state.mjs";
 import { SESSION_ID_ENV } from "./lib/tracked-jobs.mjs";
 import { resolveWorkspaceRoot } from "./lib/workspace.mjs";
@@ -29,7 +30,7 @@ function appendEnvVar(name, value) {
   fs.appendFileSync(process.env.CLAUDE_ENV_FILE, `export ${name}=${shellEscape(value)}\n`, "utf8");
 }
 
-function cleanupSessionJobs(cwd, sessionId) {
+async function cleanupSessionJobs(cwd, sessionId) {
   if (!cwd || !sessionId) {
     return;
   }
@@ -47,15 +48,14 @@ function cleanupSessionJobs(cwd, sessionId) {
   }
 
   for (const job of removedJobs) {
+    cleanupSnapshotPath(job.snapshotPath);
     const stillRunning = job.status === "queued" || job.status === "running";
     if (!stillRunning) {
       continue;
     }
     for (const pid of [job.pid, job.agentPid]) {
       try {
-        if (Number.isInteger(pid) && pid > 0) {
-          terminateProcessTree(pid);
-        }
+        await stopProcessTree(pid);
       } catch {
         // Ignore teardown failures during session shutdown.
       }
@@ -73,12 +73,12 @@ function handleSessionStart(input) {
   appendEnvVar(PLUGIN_DATA_ENV, process.env[PLUGIN_DATA_ENV]);
 }
 
-function handleSessionEnd(input) {
+async function handleSessionEnd(input) {
   const cwd = input.cwd || process.cwd();
-  cleanupSessionJobs(cwd, input.session_id || process.env[SESSION_ID_ENV]);
+  await cleanupSessionJobs(cwd, input.session_id || process.env[SESSION_ID_ENV]);
 }
 
-function main() {
+async function main() {
   const input = readHookInput();
   const eventName = process.argv[2] ?? input.hook_event_name ?? "";
 
@@ -88,12 +88,12 @@ function main() {
   }
 
   if (eventName === "SessionEnd") {
-    handleSessionEnd(input);
+    await handleSessionEnd(input);
   }
 }
 
 try {
-  main();
+  await main();
 } catch (error) {
   process.stderr.write(`${error instanceof Error ? error.message : String(error)}\n`);
   process.exitCode = 1;

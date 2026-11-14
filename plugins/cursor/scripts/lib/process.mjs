@@ -116,6 +116,31 @@ export function terminateProcessTree(pid, options = {}) {
   }
 }
 
+export async function stopProcessTree(pid) {
+  if (!Number.isInteger(pid) || pid <= 0) {
+    return;
+  }
+  if (process.platform === "win32") {
+    terminateProcessTree(pid);
+    return;
+  }
+  const signalGroup = (signal) => {
+    try {
+      process.kill(-pid, signal);
+    } catch {
+      // Not a group leader, or the group is already gone.
+    }
+    try {
+      process.kill(pid, signal);
+    } catch {
+      // Already exited.
+    }
+  };
+  signalGroup("SIGTERM");
+  await new Promise((resolve) => setTimeout(resolve, 200));
+  signalGroup("SIGKILL");
+}
+
 export function formatCommandFailure(result) {
   const parts = [`${result.command} ${result.args.join(" ")}`.trim()];
   if (result.signal) {

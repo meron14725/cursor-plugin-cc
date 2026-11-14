@@ -11,7 +11,7 @@ This repository is a modified fork of [openai/codex-plugin-cc](https://github.co
 - `/cursor:status`, `/cursor:result`, and `/cursor:cancel` to inspect and stop background runs
 - `/cursor:setup` to check that Cursor CLI is installed and logged in
 
-Reviews run in a temporary git worktree, not in your checkout. `cursor-agent` is started with `--mode ask` and `-p`. [Headless print mode can still edit files inside its workspace without `--force`](https://cursor.com/docs/cli/headless), and the docs do not say that ask mode disables that. The plugin treats write, shell, MCP, and task tool calls as a failed review and stops the process tree. The temporary worktree is removed afterward, so those writes are not applied to your checkout.
+Reviews run in a temporary snapshot directory, not in your checkout and not in a linked git worktree. The snapshot has no `.git` directory, so it does not share config, refs, or hooks with your repository. `cursor-agent` is started with `--mode ask` and `-p`. [Headless print mode can still edit files inside its workspace without `--force`](https://cursor.com/docs/cli/headless), and the docs do not say that ask mode disables that. The plugin treats write, shell, MCP, and task tool calls as a failed review and stops the process group with `SIGTERM`, then `SIGKILL`. The snapshot is removed when the run ends, when the process is cancelled, and when the Claude session ends.
 
 ## Requirements
 
@@ -120,12 +120,12 @@ Stops an active background review by signaling the companion process and the `cu
 ## How a review runs
 
 1. The plugin selects the git target (working tree, branch, or `--base`).
-2. It creates a temporary git worktree. A working-tree review copies the uncommitted files into that worktree. Your checkout is not the process workspace.
-3. It writes the diff to `.cursor-review/context.md` in that worktree. The argv prompt stays small: for a large diff it tells the model to read that file and not to run git or shell.
-4. It spawns `cursor-agent -p --output-format stream-json --mode ask --trust --workspace <temporary worktree>`.
+2. It materializes a temporary directory with `git archive` of `HEAD` when a commit exists, then copies dirty and untracked files in without following symlinks. A repository with no commits is copied from the untracked files alone.
+3. It writes the full diff, in chunks, to a `context/` directory next to that tree. Those files are outside the reviewed tree. The prompt lists their absolute paths and says they are plugin-generated.
+4. It spawns `cursor-agent -p --output-format stream-json --mode ask --trust --workspace <snapshot>`.
 5. `--model` is added only when you passed `--model` or set `CURSOR_AGENT_MODEL`.
-6. Read and search tools are allowed. A write, shell, MCP, or task tool fails the review. The plugin stops the process tree with `SIGTERM` and follows with `SIGKILL` if it is still alive. Tool lines are written to the job log as they arrive. Use `/cursor:status <job-id>` to see them.
-7. The temporary worktree is removed when the run ends.
+6. Read and search tools are allowed. A write, shell, MCP, task, or unnamed tool call fails the review. The plugin signals the process group with `SIGTERM` and then `SIGKILL`. Tool lines are written to the job log as they arrive. Use `/cursor:status <job-id>` to see them.
+7. The snapshot path is stored on the job and removed on completion, cancel, `SIGTERM`, `SIGINT`, and session end.
 
 `--trust` only skips Cursor's headless workspace-trust prompt. It is not permission to edit. Ask mode is requested because the docs describe it as read-only, but print mode is separately documented as able to edit the workspace without `--force`. The isolated worktree and the tool block are what keep the review off your checkout.
 

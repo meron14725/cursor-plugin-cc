@@ -294,7 +294,7 @@ function buildAdversarialCollectionGuidance(options = {}) {
     return "Use the repository context below as primary evidence.";
   }
 
-  return "The repository context below is a lightweight summary. Read `.cursor-review/context.md` in the review workspace with the read tool. That file contains the diff. Do not run shell, git, or any command, and do not edit files.";
+  return "The repository context below is a lightweight summary. The full diff is in plugin-generated files outside this workspace. Read the absolute paths listed in the prompt. Do not report those files as findings. Do not run shell, git, or any command, and do not edit files.";
 }
 
 export function collectReviewContext(cwd, target, options = {}) {

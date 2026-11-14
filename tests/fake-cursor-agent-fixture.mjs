@@ -34,9 +34,13 @@ function record(kind) {
     const workspaceIndex = args.indexOf("--workspace");
     const workspace = workspaceIndex >= 0 ? args[workspaceIndex + 1] : process.cwd();
     state.workspace = workspace;
-    const contextPath = path.join(workspace, ".cursor-review", "context.md");
-    if (fs.existsSync(contextPath)) {
-      state.contextFile = fs.readFileSync(contextPath, "utf8");
+    const contextDir = path.join(path.dirname(workspace), "context");
+    if (fs.existsSync(contextDir)) {
+      state.contextFile = fs
+        .readdirSync(contextDir)
+        .sort()
+        .map((name) => fs.readFileSync(path.join(contextDir, name), "utf8"))
+        .join("\\n");
     }
   }
   saveState(state);

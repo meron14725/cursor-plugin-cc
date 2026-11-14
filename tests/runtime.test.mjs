@@ -263,7 +263,7 @@ test("adversarial review asks Cursor to inspect larger diffs itself", () => {
   assert.equal(result.status, 0, result.stderr);
   const state = readFakeState(binDir);
   assert.match(state.lastPrompt, /lightweight summary/i);
-  assert.match(state.lastPrompt, /\.cursor-review\/context\.md/);
+  assert.match(state.lastPrompt, /plugin-generated/i);
   assert.match(state.lastPrompt, /Do not run shell, git/i);
   assert.doesNotMatch(state.lastPrompt, /git commands/i);
   assert.doesNotMatch(state.lastPrompt, /PROMPT_SELF_COLLECT_[ABC]/);
@@ -533,6 +533,80 @@ test("status shows a tool line while the review is still running", { timeout: 15
     env: buildEnv(binDir)
   });
   assert.equal(cancel.status, 0, cancel.stderr);
+});
+
+test("cancel removes the review snapshot", { timeout: 15000 }, async (t) => {
+  const repo = prepareRepo();
+  const binDir = makeTempDir();
+  installFakeCursorAgent(binDir, "sleep");
+  const child = spawn(process.execPath, [SCRIPT, "review"], {
+    cwd: repo,
+    env: buildEnv(binDir),
+    detached: false,
+    stdio: "ignore"
+  });
+  t.after(() => {
+    try {
+      process.kill(child.pid, "SIGKILL");
+    } catch {
+      // Cancel already stopped it.
+    }
+  });
+
+  const running = await waitFor(() => {
+    const status = run("node", [SCRIPT, "status", "--json"], { cwd: repo, env: buildEnv(binDir) });
+    if (status.status !== 0) {
+      return null;
+    }
+    const job = JSON.parse(status.stdout).running?.find((entry) => entry.snapshotPath);
+    return job ?? null;
+  });
+  assert.equal(fs.existsSync(running.snapshotPath), true);
+
+  const cancel = run("node", [SCRIPT, "cancel", running.id], { cwd: repo, env: buildEnv(binDir) });
+  assert.equal(cancel.status, 0, cancel.stderr);
+  assert.equal(fs.existsSync(running.snapshotPath), false);
+});
+
+test("SIGTERM removes the review snapshot", { timeout: 15000 }, async (t) => {
+  const repo = prepareRepo();
+  const binDir = makeTempDir();
+  installFakeCursorAgent(binDir, "sleep");
+  const child = spawn(process.execPath, [SCRIPT, "review"], {
+    cwd: repo,
+    env: buildEnv(binDir),
+    detached: true,
+    stdio: "ignore"
+  });
+  child.unref();
+  t.after(() => {
+    try {
+      process.kill(-child.pid, "SIGKILL");
+    } catch {
+      try {
+        process.kill(child.pid, "SIGKILL");
+      } catch {
+        // Already gone.
+      }
+    }
+  });
+
+  const running = await waitFor(() => {
+    const status = run("node", [SCRIPT, "status", "--json"], { cwd: repo, env: buildEnv(binDir) });
+    if (status.status !== 0) {
+      return null;
+    }
+    const job = JSON.parse(status.stdout).running?.find((entry) => entry.snapshotPath && entry.agentPid);
+    return job ?? null;
+  });
+  assert.equal(fs.existsSync(running.snapshotPath), true);
+  process.kill(child.pid, "SIGTERM");
+  await waitFor(() => fs.existsSync(running.snapshotPath) === false);
+  try {
+    process.kill(running.agentPid, "SIGKILL");
+  } catch {
+    // The agent exited with the review.
+  }
 });
 
 test("cancel stops a review whose companion is not a process-group leader", { timeout: 15000 }, async (t) => {

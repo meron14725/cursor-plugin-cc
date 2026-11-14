@@ -17,6 +17,7 @@ function normalizeProgressEvent(value) {
       threadId: typeof value.threadId === "string" && value.threadId.trim() ? value.threadId.trim() : null,
       turnId: typeof value.turnId === "string" && value.turnId.trim() ? value.turnId.trim() : null,
       agentPid: Number.isInteger(value.agentPid) && value.agentPid > 0 ? value.agentPid : null,
+      snapshotPath: typeof value.snapshotPath === "string" && value.snapshotPath.trim() ? value.snapshotPath.trim() : null,
       stderrMessage: value.stderrMessage == null ? null : String(value.stderrMessage).trim(),
       logTitle: typeof value.logTitle === "string" && value.logTitle.trim() ? value.logTitle.trim() : null,
       logBody: value.logBody == null ? null : String(value.logBody).trimEnd()
@@ -29,6 +30,7 @@ function normalizeProgressEvent(value) {
     threadId: null,
     turnId: null,
     agentPid: null,
+    snapshotPath: null,
     stderrMessage: String(value ?? "").trim(),
     logTitle: null,
     logBody: null
@@ -74,6 +76,7 @@ export function createJobProgressUpdater(workspaceRoot, jobId) {
   let lastThreadId = null;
   let lastTurnId = null;
   let lastAgentPid = null;
+  let lastSnapshotPath = null;
 
   return (event) => {
     const normalized = normalizeProgressEvent(event);
@@ -101,6 +104,12 @@ export function createJobProgressUpdater(workspaceRoot, jobId) {
     if (normalized.agentPid && normalized.agentPid !== lastAgentPid) {
       lastAgentPid = normalized.agentPid;
       patch.agentPid = normalized.agentPid;
+      changed = true;
+    }
+
+    if (normalized.snapshotPath && normalized.snapshotPath !== lastSnapshotPath) {
+      lastSnapshotPath = normalized.snapshotPath;
+      patch.snapshotPath = normalized.snapshotPath;
       changed = true;
     }
 

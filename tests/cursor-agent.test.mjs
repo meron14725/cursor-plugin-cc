@@ -128,6 +128,9 @@ test("shell, MCP, task, and completed write tool calls are blocked; reads are no
   );
   assert.equal(read.blocked, false);
   assert.deepEqual(read.progress, ["Reading README.md"]);
+
+  const empty = parseCursorAgentOutput(JSON.stringify({ type: "tool_call", subtype: "started", tool_call: {} }));
+  assert.equal(empty.blocked, true);
 });
 
 test("parseStructuredOutput accepts raw JSON and fenced JSON", () => {

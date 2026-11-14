@@ -166,7 +166,7 @@ test("collectReviewContext falls back to lightweight context for larger adversar
   assert.equal(context.inputMode, "self-collect");
   assert.equal(context.fileCount, 3);
   assert.match(context.collectionGuidance, /lightweight summary/i);
-  assert.match(context.collectionGuidance, /\.cursor-review\/context\.md/);
+  assert.match(context.collectionGuidance, /plugin-generated files outside this workspace/i);
   assert.match(context.collectionGuidance, /Do not run shell, git/i);
   assert.doesNotMatch(context.collectionGuidance, /git commands/i);
   assert.doesNotMatch(context.content, /SELF_COLLECT_MARKER_[ABC]/);

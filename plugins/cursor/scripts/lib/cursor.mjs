@@ -1,6 +1,6 @@
 import { spawn } from "node:child_process";
 
-import { binaryAvailable, runCommand, terminateProcessTree } from "./process.mjs";
+import { binaryAvailable, runCommand } from "./process.mjs";
 
 export const CURSOR_AGENT_BIN = "cursor-agent";
 export const CURSOR_AGENT_BIN_ENV = "CURSOR_AGENT_BIN";
@@ -57,7 +57,7 @@ const READ_ONLY_TOOL = /^(read|grep|glob|rg|list|search|semsearch|semanticsearch
 
 export function classifyToolCall(toolCall) {
   if (!toolCall || typeof toolCall !== "object") {
-    return { allowed: true, name: null };
+    return { allowed: false, name: null };
   }
   const names = [];
   if (typeof toolCall.function?.name === "string" && toolCall.function.name.trim()) {
@@ -69,7 +69,7 @@ export function classifyToolCall(toolCall) {
     }
   }
   if (names.length === 0) {
-    return { allowed: true, name: null };
+    return { allowed: false, name: null };
   }
   const name = names[0];
   const normalized = name.replace(/[^a-z]/gi, "").toLowerCase();
@@ -375,15 +375,20 @@ export function runCursorAgent(cwd, options = {}) {
     let killedForWrite = false;
     let emittedProgress = 0;
     const abortAgent = () => {
-      terminateProcessTree(child.pid);
-      const timer = setTimeout(() => {
+      const signalGroup = (signal) => {
         try {
-          process.kill(child.pid, 0);
+          process.kill(-child.pid, signal);
         } catch {
-          return;
+          // The process may already have exited, or it may not be a group leader.
         }
-        terminateProcessTree(child.pid, { signal: "SIGKILL" });
-      }, 200);
+        try {
+          process.kill(child.pid, signal);
+        } catch {
+          // Already exited.
+        }
+      };
+      signalGroup("SIGTERM");
+      const timer = setTimeout(() => signalGroup("SIGKILL"), 200);
       timer.unref?.();
       child.once("close", () => clearTimeout(timer));
     };
