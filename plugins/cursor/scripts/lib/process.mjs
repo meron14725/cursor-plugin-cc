@@ -100,20 +100,18 @@ export function terminateProcessTree(pid, options = {}) {
   try {
     killImpl(-pid, "SIGTERM");
     return { attempted: true, delivered: true, method: "process-group" };
-  } catch (error) {
-    if (error?.code !== "ESRCH") {
-      try {
-        killImpl(pid, "SIGTERM");
-        return { attempted: true, delivered: true, method: "process" };
-      } catch (innerError) {
-        if (innerError?.code === "ESRCH") {
-          return { attempted: true, delivered: false, method: "process" };
-        }
-        throw innerError;
-      }
-    }
+  } catch {
+    // A live process that is not a group leader raises ESRCH for kill(-pid).
+  }
 
-    return { attempted: true, delivered: false, method: "process-group" };
+  try {
+    killImpl(pid, "SIGTERM");
+    return { attempted: true, delivered: true, method: "process" };
+  } catch (error) {
+    if (error?.code === "ESRCH") {
+      return { attempted: true, delivered: false, method: "process" };
+    }
+    throw error;
   }
 }
 

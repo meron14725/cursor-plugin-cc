@@ -451,6 +451,60 @@ test("status and result without a job id stay inside the current Claude session"
   assert.doesNotMatch(result.stdout, /other session/);
 });
 
+test("cancel stops a review whose companion is not a process-group leader", { timeout: 15000 }, async (t) => {
+  const repo = prepareRepo();
+  const binDir = makeTempDir();
+  installFakeCursorAgent(binDir, "sleep");
+  const child = spawn(process.execPath, [SCRIPT, "review"], {
+    cwd: repo,
+    env: buildEnv(binDir),
+    detached: false,
+    stdio: "ignore"
+  });
+  t.after(() => {
+    try {
+      process.kill(child.pid, "SIGTERM");
+    } catch {
+      // The cancel command already stopped it.
+    }
+  });
+
+  const running = await waitFor(() => {
+    const status = run("node", [SCRIPT, "status", "--json"], {
+      cwd: repo,
+      env: buildEnv(binDir)
+    });
+    if (status.status !== 0) {
+      return null;
+    }
+    const payload = JSON.parse(status.stdout);
+    const job = payload.running?.find((entry) => Number.isInteger(entry.agentPid) && entry.agentPid > 0);
+    return job ? { job } : null;
+  });
+
+  const cancel = run("node", [SCRIPT, "cancel", running.job.id, "--json"], {
+    cwd: repo,
+    env: buildEnv(binDir)
+  });
+  assert.equal(cancel.status, 0, cancel.stderr);
+  assert.equal(JSON.parse(cancel.stdout).status, "cancelled");
+
+  await waitFor(() => {
+    try {
+      process.kill(child.pid, 0);
+      return false;
+    } catch (error) {
+      return error?.code === "ESRCH";
+    }
+  });
+  await new Promise((resolve) => setTimeout(resolve, 250));
+
+  const state = JSON.parse(fs.readFileSync(path.join(resolveStateDir(repo), "state.json"), "utf8"));
+  const stored = state.jobs.find((job) => job.id === running.job.id);
+  assert.equal(stored.status, "cancelled");
+  assert.notEqual(stored.phase, "failed");
+});
+
 test("cancel stops a running cursor-agent review", { timeout: 15000 }, async (t) => {
   const repo = prepareRepo();
   const binDir = makeTempDir();

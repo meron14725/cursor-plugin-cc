@@ -32,6 +32,25 @@ test("terminateProcessTree uses taskkill on Windows", () => {
   assert.equal(outcome.method, "taskkill");
 });
 
+test("terminateProcessTree signals a live process that is not a group leader", () => {
+  const calls = [];
+  const outcome = terminateProcessTree(4321, {
+    platform: "linux",
+    killImpl(pid) {
+      calls.push(pid);
+      if (pid < 0) {
+        const error = new Error("not a process group");
+        error.code = "ESRCH";
+        throw error;
+      }
+    }
+  });
+
+  assert.deepEqual(calls, [-4321, 4321]);
+  assert.equal(outcome.delivered, true);
+  assert.equal(outcome.method, "process");
+});
+
 test("terminateProcessTree treats missing Windows processes as already stopped", () => {
   const outcome = terminateProcessTree(1234, {
     platform: "win32",

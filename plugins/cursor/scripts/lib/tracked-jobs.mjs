@@ -1,7 +1,7 @@
 import fs from "node:fs";
 import process from "node:process";
 
-import { readJobFile, resolveJobFile, resolveJobLogFile, upsertJob, writeJobFile } from "./state.mjs";
+import { listJobs, readJobFile, resolveJobFile, resolveJobLogFile, upsertJob, writeJobFile } from "./state.mjs";
 
 export const SESSION_ID_ENV = "CURSOR_COMPANION_SESSION_ID";
 
@@ -148,6 +148,15 @@ function readStoredJobOrNull(workspaceRoot, jobId) {
   return readJobFile(jobFile);
 }
 
+function indexedJobStatus(workspaceRoot, jobId) {
+  return listJobs(workspaceRoot).find((job) => job.id === jobId)?.status ?? null;
+}
+
+function keepExistingTerminalState(workspaceRoot, jobId) {
+  const status = indexedJobStatus(workspaceRoot, jobId);
+  return status === "cancelled" || status == null;
+}
+
 export async function runTrackedJob(job, runner, options = {}) {
   const runningRecord = {
     ...job,
@@ -162,6 +171,9 @@ export async function runTrackedJob(job, runner, options = {}) {
 
   try {
     const execution = await runner();
+    if (keepExistingTerminalState(job.workspaceRoot, job.id)) {
+      return execution;
+    }
     const completionStatus = execution.exitStatus === 0 ? "completed" : "failed";
     const completedAt = nowIso();
     writeJobFile(job.workspaceRoot, job.id, {
@@ -188,6 +200,9 @@ export async function runTrackedJob(job, runner, options = {}) {
     appendLogBlock(options.logFile ?? job.logFile ?? null, "Final output", execution.rendered);
     return execution;
   } catch (error) {
+    if (keepExistingTerminalState(job.workspaceRoot, job.id)) {
+      throw error;
+    }
     const errorMessage = error instanceof Error ? error.message : String(error);
     const existing = readStoredJobOrNull(job.workspaceRoot, job.id) ?? runningRecord;
     const completedAt = nowIso();
