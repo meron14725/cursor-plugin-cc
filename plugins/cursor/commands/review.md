@@ -60,4 +60,4 @@ Bash({
 })
 ```
 - Do not call `BashOutput` or wait for completion in this turn.
-- After launching the command, tell the user: "Cursor review started in the background. Check `/cursor:status` for progress."
+- After launching the command, tell the user: "Cursor review started in the background. Run `/cursor:status`, then `/cursor:status <job-id>` to see live progress."

@@ -27,6 +27,28 @@ test("renderReviewResult degrades gracefully when JSON is missing required revie
   assert.match(output, /Raw final message:/);
 });
 
+test("renderReviewResult rejects a verdict outside the schema enum", () => {
+  const output = renderReviewResult(
+    {
+      parsed: {
+        verdict: "ship-it",
+        summary: "Looks fine.",
+        findings: [],
+        next_steps: []
+      },
+      rawOutput: "{\"verdict\":\"ship-it\"}",
+      parseError: null
+    },
+    {
+      reviewLabel: "Review",
+      targetLabel: "working tree diff"
+    }
+  );
+
+  assert.match(output, /unexpected review shape/i);
+  assert.match(output, /approve` or `needs-attention/);
+});
+
 test("renderStoredJobResult prefers rendered output for structured review jobs", () => {
   const output = renderStoredJobResult(
     {

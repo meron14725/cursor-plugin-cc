@@ -261,10 +261,16 @@ test("adversarial review asks Cursor to inspect larger diffs itself", () => {
   });
 
   assert.equal(result.status, 0, result.stderr);
-  const prompt = readFakeState(binDir).lastPrompt;
-  assert.match(prompt, /lightweight summary/i);
-  assert.match(prompt, /read-only git commands/i);
-  assert.doesNotMatch(prompt, /PROMPT_SELF_COLLECT_[ABC]/);
+  const state = readFakeState(binDir);
+  assert.match(state.lastPrompt, /lightweight summary/i);
+  assert.match(state.lastPrompt, /\.cursor-review\/context\.md/);
+  assert.match(state.lastPrompt, /Do not run shell, git/i);
+  assert.doesNotMatch(state.lastPrompt, /git commands/i);
+  assert.doesNotMatch(state.lastPrompt, /PROMPT_SELF_COLLECT_[ABC]/);
+  assert.match(state.contextFile, /PROMPT_SELF_COLLECT_A/);
+  assert.match(state.contextFile, /PROMPT_SELF_COLLECT_B/);
+  assert.match(state.contextFile, /PROMPT_SELF_COLLECT_C/);
+  assert.notEqual(path.resolve(state.workspace), path.resolve(repo));
 });
 
 test("review fails when cursor-agent tries to write a file", () => {
@@ -278,9 +284,31 @@ test("review fails when cursor-agent tries to write a file", () => {
   });
 
   assert.notEqual(result.status, 0);
-  assert.match(result.stdout, /attempted a file write/);
-  assert.match(result.stdout, /--mode ask/);
+  assert.match(result.stdout, /must not edit files/);
+  assert.match(result.stdout, /writeToolCall/);
   assert.equal(fs.readFileSync(path.join(repo, "src", "app.js"), "utf8").includes("hacked"), false);
+  const workspace = readFakeState(binDir).workspace;
+  assert.notEqual(path.resolve(workspace), path.resolve(repo));
+  assert.match(workspace, /cursor-review-/);
+  const worktrees = run("git", ["worktree", "list"], { cwd: repo });
+  assert.doesNotMatch(worktrees.stdout, /cursor-review-/);
+});
+
+test("review fails when cursor-agent runs a shell or a completed write", () => {
+  const repo = prepareRepo();
+  const shellBin = makeTempDir();
+  installFakeCursorAgent(shellBin, "shell-attempt");
+  const shell = run("node", [SCRIPT, "review"], { cwd: repo, env: buildEnv(shellBin) });
+  assert.notEqual(shell.status, 0);
+  assert.match(shell.stdout, /shellToolCall/);
+  assert.match(shell.stdout, /must not edit files/);
+  assert.equal(fs.existsSync(path.join(repo, "hacked.txt")), false);
+
+  const writeBin = makeTempDir();
+  installFakeCursorAgent(writeBin, "write-completed");
+  const completed = run("node", [SCRIPT, "review"], { cwd: repo, env: buildEnv(writeBin) });
+  assert.notEqual(completed.status, 0);
+  assert.match(completed.stdout, /writeToolCall/);
 });
 
 test("review surfaces cursor-agent failures", () => {
@@ -449,6 +477,62 @@ test("status and result without a job id stay inside the current Claude session"
   assert.equal(result.status, 0, result.stderr);
   assert.match(result.stdout, /current session/);
   assert.doesNotMatch(result.stdout, /other session/);
+});
+
+test("status shows a tool line while the review is still running", { timeout: 15000 }, async (t) => {
+  const repo = prepareRepo();
+  const binDir = makeTempDir();
+  installFakeCursorAgent(binDir, "progress-then-sleep");
+  const child = spawn(process.execPath, [SCRIPT, "review"], {
+    cwd: repo,
+    env: buildEnv(binDir),
+    detached: true,
+    stdio: "ignore"
+  });
+  child.unref();
+  t.after(() => {
+    try {
+      process.kill(-child.pid, "SIGTERM");
+    } catch {
+      try {
+        process.kill(child.pid, "SIGTERM");
+      } catch {
+        // The process already exited.
+      }
+    }
+  });
+
+  const running = await waitFor(() => {
+    const status = run("node", [SCRIPT, "status", "--json"], {
+      cwd: repo,
+      env: buildEnv(binDir)
+    });
+    if (status.status !== 0) {
+      return null;
+    }
+    const payload = JSON.parse(status.stdout);
+    const job = payload.running?.[0];
+    if (!job) {
+      return null;
+    }
+    return job.progressPreview?.some((line) => line.includes("Reading README.md")) ? job : null;
+  });
+
+  assert.equal(running.status, "running");
+  assert.match(running.progressPreview.join("\n"), /Reading README.md/);
+
+  const single = run("node", [SCRIPT, "status", running.id], {
+    cwd: repo,
+    env: buildEnv(binDir)
+  });
+  assert.equal(single.status, 0, single.stderr);
+  assert.match(single.stdout, /Reading README.md/);
+
+  const cancel = run("node", [SCRIPT, "cancel", running.id], {
+    cwd: repo,
+    env: buildEnv(binDir)
+  });
+  assert.equal(cancel.status, 0, cancel.stderr);
 });
 
 test("cancel stops a review whose companion is not a process-group leader", { timeout: 15000 }, async (t) => {

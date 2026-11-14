@@ -1,5 +1,6 @@
 #!/usr/bin/env node
 
+import fs from "node:fs";
 import path from "node:path";
 import process from "node:process";
 import { fileURLToPath } from "node:url";
@@ -17,6 +18,7 @@ import { readJsonFile } from "./lib/fs.mjs";
 import { collectReviewContext, ensureGitRepository, resolveReviewTarget } from "./lib/git.mjs";
 import { binaryAvailable, terminateProcessTree } from "./lib/process.mjs";
 import { interpolateTemplate, loadPromptTemplate } from "./lib/prompts.mjs";
+import { createIsolatedReviewWorkspace } from "./lib/review-workspace.mjs";
 import { generateJobId, upsertJob, writeJobFile } from "./lib/state.mjs";
 import {
   buildSingleJobSnapshot,
@@ -120,8 +122,24 @@ function loadReviewSchemaText() {
   return `${JSON.stringify(readJsonFile(REVIEW_SCHEMA_PATH), null, 2)}\n`;
 }
 
+const REVIEW_CONTEXT_MAX_BYTES = 2 * 1024 * 1024;
+
 function appendOutputSchema(prompt) {
-  return `${prompt.trim()}\n\n<output_schema>\nReturn only JSON matching this schema. Do not wrap it in markdown fences. Do not edit files.\n${loadReviewSchemaText()}</output_schema>\n`;
+  return `${prompt.trim()}\n\n<output_schema>\nReturn only JSON matching this schema. Do not wrap it in markdown fences. Do not edit files. Do not run shell, git, MCP, or task tools. Use the read tool only.\n${loadReviewSchemaText()}</output_schema>\n`;
+}
+
+function reviewContextBody(cwd, target, promptContext) {
+  if (promptContext.inputMode === "inline-diff") {
+    return promptContext.content;
+  }
+  const full = collectReviewContext(cwd, target, {
+    maxInlineFiles: 100000,
+    maxInlineDiffBytes: REVIEW_CONTEXT_MAX_BYTES
+  });
+  if (full.inputMode === "inline-diff") {
+    return full.content;
+  }
+  return `${promptContext.content}\n\nThe full diff was larger than 2MB and was not copied into this file. Use the changed-file list above. Do not run shell or git.\n`;
 }
 
 async function buildSetupReport(cwd) {
@@ -242,12 +260,24 @@ async function executeReviewRun(request) {
   const context = collectReviewContext(request.cwd, target);
   const prompt =
     reviewName === "Review" ? buildReviewPrompt(context) : buildAdversarialReviewPrompt(context, focusText);
-  const result = await runCursorAgent(context.repoRoot, {
-    prompt,
-    model: request.model,
-    resume: request.resume,
-    onProgress: request.onProgress
+  const isolated = createIsolatedReviewWorkspace(context.repoRoot, {
+    syncWorkingTree: target.mode === "working-tree"
   });
+  let result;
+  try {
+    const contextDir = path.join(isolated.path, ".cursor-review");
+    fs.mkdirSync(contextDir, { recursive: true });
+    fs.writeFileSync(path.join(contextDir, "context.md"), reviewContextBody(request.cwd, target, context), "utf8");
+    result = await runCursorAgent(isolated.path, {
+      workspace: isolated.path,
+      prompt,
+      model: request.model,
+      resume: request.resume,
+      onProgress: request.onProgress
+    });
+  } finally {
+    isolated.cleanup();
+  }
 
   const failureMessage = result.errorMessage || result.stderr.trim();
   if (result.status !== 0) {

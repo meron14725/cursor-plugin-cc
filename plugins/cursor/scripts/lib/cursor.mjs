@@ -1,6 +1,6 @@
 import { spawn } from "node:child_process";
 
-import { binaryAvailable, runCommand } from "./process.mjs";
+import { binaryAvailable, runCommand, terminateProcessTree } from "./process.mjs";
 
 export const CURSOR_AGENT_BIN = "cursor-agent";
 export const CURSOR_AGENT_BIN_ENV = "CURSOR_AGENT_BIN";
@@ -52,17 +52,31 @@ export function buildCursorAgentArgs({ workspace, model = null, resume = null, p
   return args;
 }
 
-function isWriteTool(toolCall) {
+const FORBIDDEN_TOOL = /write|edit|delete|replace|applypatch|shell|bash|terminal|mcp|task|exec|command/;
+const READ_ONLY_TOOL = /^(read|grep|glob|rg|list|search|semsearch|semanticsearch|codebasesearch|ripgrep)/;
+
+export function classifyToolCall(toolCall) {
   if (!toolCall || typeof toolCall !== "object") {
-    return false;
+    return { allowed: true, name: null };
+  }
+  const names = [];
+  if (typeof toolCall.function?.name === "string" && toolCall.function.name.trim()) {
+    names.push(toolCall.function.name.trim());
   }
   for (const key of Object.keys(toolCall)) {
-    if (/write|edit|delete|strreplace|applypatch/i.test(key)) {
-      return true;
+    if (key !== "function") {
+      names.push(key);
     }
   }
-  const name = toolCall.function?.name;
-  return typeof name === "string" && /write|edit|delete|strreplace|applypatch/i.test(name);
+  if (names.length === 0) {
+    return { allowed: true, name: null };
+  }
+  const name = names[0];
+  const normalized = name.replace(/[^a-z]/gi, "").toLowerCase();
+  if (FORBIDDEN_TOOL.test(normalized) || !READ_ONLY_TOOL.test(normalized)) {
+    return { allowed: false, name };
+  }
+  return { allowed: true, name };
 }
 
 function toolLabel(toolCall) {
@@ -104,6 +118,8 @@ export function parseCursorAgentOutput(stdout) {
   let failed = false;
   const progress = [];
   let wroteFiles = false;
+  let blocked = false;
+  let blockedTool = null;
 
   for (const event of events) {
     if (!event || typeof event !== "object") {
@@ -115,13 +131,20 @@ export function parseCursorAgentOutput(stdout) {
     if (event.type === "system" && event.subtype === "init" && typeof event.model === "string") {
       model = event.model;
     }
-    if (event.type === "tool_call" && event.subtype !== "completed") {
-      if (isWriteTool(event.tool_call)) {
+    if (event.type === "tool_call") {
+      const classification = classifyToolCall(event.tool_call);
+      if (!classification.allowed) {
+        blocked = true;
+        blockedTool = blockedTool ?? classification.name;
         wroteFiles = true;
-      }
-      const label = toolLabel(event.tool_call);
-      if (label) {
-        progress.push(label);
+        if (event.subtype !== "completed") {
+          progress.push(`Blocked tool: ${classification.name ?? "unknown"}`);
+        }
+      } else if (event.subtype !== "completed") {
+        const label = toolLabel(event.tool_call);
+        if (label) {
+          progress.push(label);
+        }
       }
     }
     if (event.type === "result" || (sawResult === false && typeof event.result === "string" && event.session_id)) {
@@ -140,6 +163,8 @@ export function parseCursorAgentOutput(stdout) {
     model,
     text: resultText,
     wroteFiles,
+    blocked,
+    blockedTool,
     failed,
     progress
   };
@@ -348,20 +373,39 @@ export function runCursorAgent(cwd, options = {}) {
     let stdout = "";
     let stderr = "";
     let killedForWrite = false;
-    const stopIfWriting = () => {
-      if (killedForWrite || !parseCursorAgentOutput(stdout).wroteFiles) {
-        return;
+    let emittedProgress = 0;
+    const abortAgent = () => {
+      terminateProcessTree(child.pid);
+      const timer = setTimeout(() => {
+        try {
+          process.kill(child.pid, 0);
+        } catch {
+          return;
+        }
+        terminateProcessTree(child.pid, { signal: "SIGKILL" });
+      }, 200);
+      timer.unref?.();
+      child.once("close", () => clearTimeout(timer));
+    };
+    const consumeStdout = () => {
+      const parsed = parseCursorAgentOutput(stdout);
+      const fresh = parsed.progress.slice(emittedProgress);
+      emittedProgress = parsed.progress.length;
+      for (const line of fresh) {
+        options.onProgress?.({
+          message: line,
+          phase: "reviewing",
+          threadId: parsed.sessionId
+        });
       }
-      killedForWrite = true;
-      try {
-        process.kill(-child.pid, "SIGTERM");
-      } catch {
-        child.kill("SIGTERM");
+      if (parsed.blocked && !killedForWrite) {
+        killedForWrite = true;
+        abortAgent();
       }
     };
     child.stdout.on("data", (chunk) => {
       stdout += chunk.toString();
-      stopIfWriting();
+      consumeStdout();
     });
     child.stderr.on("data", (chunk) => {
       stderr += chunk.toString();
@@ -379,7 +423,8 @@ export function runCursorAgent(cwd, options = {}) {
     });
     child.on("close", (code, signal) => {
       const parsed = parseCursorAgentOutput(stdout);
-      for (const line of parsed.progress) {
+      const fresh = parsed.progress.slice(emittedProgress);
+      for (const line of fresh) {
         options.onProgress?.({
           message: line,
           phase: "reviewing",
@@ -396,10 +441,10 @@ export function runCursorAgent(cwd, options = {}) {
 
       let status = code ?? (signal ? 1 : 0);
       let errorMessage = "";
-      if (parsed.wroteFiles) {
+      if (parsed.blocked || parsed.wroteFiles) {
         status = 1;
-        errorMessage =
-          "Review aborted because cursor-agent attempted a file write. Reviews run with --mode ask and must not edit files.";
+        const tool = parsed.blockedTool ? ` (${parsed.blockedTool})` : "";
+        errorMessage = `Review aborted because cursor-agent attempted a tool that can change the workspace${tool}. Reviews must not edit files or run shell, MCP, or task tools.`;
       } else if (parsed.failed && status === 0) {
         status = 1;
         errorMessage = stderr.trim() || "cursor-agent reported an error.";

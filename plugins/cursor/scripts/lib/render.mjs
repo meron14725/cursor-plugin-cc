@@ -25,8 +25,8 @@ function validateReviewResultShape(data) {
   if (!data || typeof data !== "object" || Array.isArray(data)) {
     return "Expected a top-level JSON object.";
   }
-  if (typeof data.verdict !== "string" || !data.verdict.trim()) {
-    return "Missing string `verdict`.";
+  if (typeof data.verdict !== "string" || !["approve", "needs-attention"].includes(data.verdict)) {
+    return "Verdict must be `approve` or `needs-attention`.";
   }
   if (typeof data.summary !== "string" || !data.summary.trim()) {
     return "Missing string `summary`.";

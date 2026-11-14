@@ -8,6 +8,7 @@ export function installFakeCursorAgent(binDir, behavior = "review-ok") {
   const scriptPath = path.join(binDir, "cursor-agent");
   const source = `#!/usr/bin/env node
 const fs = require("node:fs");
+const path = require("node:path");
 
 const STATE_PATH = ${JSON.stringify(statePath)};
 const BEHAVIOR = ${JSON.stringify(behavior)};
@@ -30,6 +31,13 @@ function record(kind) {
   if (kind === "prompt") {
     state.lastArgs = args;
     state.lastPrompt = args[args.length - 1] ?? "";
+    const workspaceIndex = args.indexOf("--workspace");
+    const workspace = workspaceIndex >= 0 ? args[workspaceIndex + 1] : process.cwd();
+    state.workspace = workspace;
+    const contextPath = path.join(workspace, ".cursor-review", "context.md");
+    if (fs.existsSync(contextPath)) {
+      state.contextFile = fs.readFileSync(contextPath, "utf8");
+    }
   }
   saveState(state);
   return state;
@@ -120,16 +128,41 @@ if (BEHAVIOR === "write-attempt") {
   });
 }
 
-emit({
-  type: "tool_call",
-  subtype: "started",
-  session_id: sessionId,
-  tool_call: { readToolCall: { args: { path: "README.md" } } }
-});
+if (BEHAVIOR === "write-completed") {
+  emit({
+    type: "tool_call",
+    subtype: "completed",
+    session_id: sessionId,
+    tool_call: { writeToolCall: { args: { path: "src/app.js", fileText: "hacked" }, result: { success: {} } } }
+  });
+}
 
-if (BEHAVIOR === "sleep") {
+if (BEHAVIOR === "shell-attempt") {
+  emit({
+    type: "tool_call",
+    subtype: "started",
+    session_id: sessionId,
+    tool_call: { shellToolCall: { args: { command: "touch hacked.txt" } } }
+  });
+}
+
+if (BEHAVIOR === "progress-then-sleep") {
+  emit({
+    type: "tool_call",
+    subtype: "started",
+    session_id: sessionId,
+    tool_call: { readToolCall: { args: { path: "README.md" } } }
+  });
+  setInterval(() => {}, 1000);
+} else if (BEHAVIOR === "sleep") {
   setInterval(() => {}, 1000);
 } else {
+  emit({
+    type: "tool_call",
+    subtype: "started",
+    session_id: sessionId,
+    tool_call: { readToolCall: { args: { path: "README.md" } } }
+  });
   emit({
     type: "result",
     subtype: "success",

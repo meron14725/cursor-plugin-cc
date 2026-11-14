@@ -60,6 +60,7 @@ export function terminateProcessTree(pid, options = {}) {
   }
 
   const platform = options.platform ?? process.platform;
+  const signal = options.signal === "SIGKILL" ? "SIGKILL" : "SIGTERM";
   const runCommandImpl = options.runCommandImpl ?? runCommand;
   const killImpl = options.killImpl ?? process.kill.bind(process);
 
@@ -98,14 +99,14 @@ export function terminateProcessTree(pid, options = {}) {
   }
 
   try {
-    killImpl(-pid, "SIGTERM");
+    killImpl(-pid, signal);
     return { attempted: true, delivered: true, method: "process-group" };
   } catch {
     // A live process that is not a group leader raises ESRCH for kill(-pid).
   }
 
   try {
-    killImpl(pid, "SIGTERM");
+    killImpl(pid, signal);
     return { attempted: true, delivered: true, method: "process" };
   } catch (error) {
     if (error?.code === "ESRCH") {

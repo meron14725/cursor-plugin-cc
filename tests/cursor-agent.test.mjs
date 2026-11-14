@@ -90,6 +90,46 @@ test("parseCursorAgentOutput reads the json result and flags write tools", () =>
   assert.equal(wrote.wroteFiles, true);
 });
 
+test("shell, MCP, task, and completed write tool calls are blocked; reads are not", () => {
+  const shell = parseCursorAgentOutput(
+    JSON.stringify({
+      type: "tool_call",
+      subtype: "started",
+      tool_call: { shellToolCall: { args: { command: "git diff" } } }
+    })
+  );
+  assert.equal(shell.blocked, true);
+  assert.match(shell.blockedTool, /shell/i);
+
+  const completedWrite = parseCursorAgentOutput(
+    JSON.stringify({
+      type: "tool_call",
+      subtype: "completed",
+      tool_call: { writeToolCall: { args: { path: "src/app.js" }, result: { success: {} } } }
+    })
+  );
+  assert.equal(completedWrite.blocked, true);
+
+  const mcp = parseCursorAgentOutput(
+    JSON.stringify({
+      type: "tool_call",
+      subtype: "started",
+      tool_call: { function: { name: "Task", arguments: "{}" } }
+    })
+  );
+  assert.equal(mcp.blocked, true);
+
+  const read = parseCursorAgentOutput(
+    JSON.stringify({
+      type: "tool_call",
+      subtype: "started",
+      tool_call: { readToolCall: { args: { path: "README.md" } } }
+    })
+  );
+  assert.equal(read.blocked, false);
+  assert.deepEqual(read.progress, ["Reading README.md"]);
+});
+
 test("parseStructuredOutput accepts raw JSON and fenced JSON", () => {
   const raw = parseStructuredOutput('{"verdict":"approve","summary":"ok","findings":[],"next_steps":[]}');
   assert.equal(raw.parsed.verdict, "approve");

@@ -11,7 +11,7 @@ This repository is a modified fork of [openai/codex-plugin-cc](https://github.co
 - `/cursor:status`, `/cursor:result`, and `/cursor:cancel` to inspect and stop background runs
 - `/cursor:setup` to check that Cursor CLI is installed and logged in
 
-Reviews always run `cursor-agent` in [ask mode](https://cursor.com/docs/cli/reference/parameters) (`--mode ask`) with `--print` and `--output-format stream-json`. They do not pass `--force`, so the review is not allowed to edit files.
+Reviews run in a temporary git worktree, not in your checkout. `cursor-agent` is started with `--mode ask` and `-p`. [Headless print mode can still edit files inside its workspace without `--force`](https://cursor.com/docs/cli/headless), and the docs do not say that ask mode disables that. The plugin treats write, shell, MCP, and task tool calls as a failed review and stops the process tree. The temporary worktree is removed afterward, so those writes are not applied to your checkout.
 
 ## Requirements
 
@@ -120,12 +120,14 @@ Stops an active background review by signaling the companion process and the `cu
 ## How a review runs
 
 1. The plugin selects the git target (working tree, branch, or `--base`).
-2. It builds a prompt from the review template, the diff (or a short summary when the diff is large), and the review JSON schema.
-3. It spawns `cursor-agent -p --output-format stream-json --mode ask --trust --workspace <repo>`.
-4. `--model` is added only when you passed `--model` or set `CURSOR_AGENT_MODEL`.
-5. If the stream reports a write tool, the plugin stops the process and marks the review failed.
+2. It creates a temporary git worktree. A working-tree review copies the uncommitted files into that worktree. Your checkout is not the process workspace.
+3. It writes the diff to `.cursor-review/context.md` in that worktree. The argv prompt stays small: for a large diff it tells the model to read that file and not to run git or shell.
+4. It spawns `cursor-agent -p --output-format stream-json --mode ask --trust --workspace <temporary worktree>`.
+5. `--model` is added only when you passed `--model` or set `CURSOR_AGENT_MODEL`.
+6. Read and search tools are allowed. A write, shell, MCP, or task tool fails the review. The plugin stops the process tree with `SIGTERM` and follows with `SIGKILL` if it is still alive. Tool lines are written to the job log as they arrive. Use `/cursor:status <job-id>` to see them.
+7. The temporary worktree is removed when the run ends.
 
-`--trust` only skips Cursor's headless workspace-trust prompt. It is not permission to edit. Ask mode is what keeps the review read-only.
+`--trust` only skips Cursor's headless workspace-trust prompt. It is not permission to edit. Ask mode is requested because the docs describe it as read-only, but print mode is separately documented as able to edit the workspace without `--force`. The isolated worktree and the tool block are what keep the review off your checkout.
 
 ## Fork
 
