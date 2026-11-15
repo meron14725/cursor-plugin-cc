@@ -1,21 +1,21 @@
 {
-  "name": "openai-codex",
+  "name": "cursor-plugin-cc",
   "owner": {
-    "name": "OpenAI"
+    "name": "meron14725"
   },
   "metadata": {
-    "description": "Codex plugins to use in Claude Code for delegation and code review.",
-    "version": "1.0.6"
+    "description": "Cursor CLI plugin for Claude Code code review.",
+    "version": "1.0.0"
   },
   "plugins": [
     {
-      "name": "codex",
-      "description": "Use Codex from Claude Code to review code or delegate tasks.",
-      "version": "1.0.6",
+      "name": "cursor",
+      "description": "Use Cursor CLI from Claude Code for read-only code review and adversarial review.",
+      "version": "1.0.0",
       "author": {
-        "name": "OpenAI"
+        "name": "meron14725"
       },
-      "source": "./plugins/codex"
+      "source": "./plugins/cursor"
     }
   ]
 }

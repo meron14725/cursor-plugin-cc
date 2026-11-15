@@ -1,7 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 
-import { renderReviewResult, renderStoredJobResult } from "../plugins/codex/scripts/lib/render.mjs";
+import { renderReviewResult, renderStoredJobResult } from "../plugins/cursor/scripts/lib/render.mjs";
 
 test("renderReviewResult degrades gracefully when JSON is missing required review fields", () => {
   const output = renderReviewResult(
@@ -22,9 +22,31 @@ test("renderReviewResult degrades gracefully when JSON is missing required revie
     }
   );
 
-  assert.match(output, /Codex returned JSON with an unexpected review shape\./);
+  assert.match(output, /Cursor returned JSON with an unexpected review shape\./);
   assert.match(output, /Missing array `findings`\./);
   assert.match(output, /Raw final message:/);
+});
+
+test("renderReviewResult rejects a verdict outside the schema enum", () => {
+  const output = renderReviewResult(
+    {
+      parsed: {
+        verdict: "ship-it",
+        summary: "Looks fine.",
+        findings: [],
+        next_steps: []
+      },
+      rawOutput: "{\"verdict\":\"ship-it\"}",
+      parseError: null
+    },
+    {
+      reviewLabel: "Review",
+      targetLabel: "working tree diff"
+    }
+  );
+
+  assert.match(output, /unexpected review shape/i);
+  assert.match(output, /approve` or `needs-attention/);
 });
 
 test("renderStoredJobResult prefers rendered output for structured review jobs", () => {
@@ -32,13 +54,13 @@ test("renderStoredJobResult prefers rendered output for structured review jobs",
     {
       id: "review-123",
       status: "completed",
-      title: "Codex Adversarial Review",
+      title: "Cursor Adversarial Review",
       jobClass: "review",
       threadId: "thr_123"
     },
     {
       threadId: "thr_123",
-      rendered: "# Codex Adversarial Review\n\nTarget: working tree diff\nVerdict: needs-attention\n",
+      rendered: "# Cursor Adversarial Review\n\nTarget: working tree diff\nVerdict: needs-attention\n",
       result: {
         result: {
           verdict: "needs-attention",
@@ -52,8 +74,8 @@ test("renderStoredJobResult prefers rendered output for structured review jobs",
     }
   );
 
-  assert.match(output, /^# Codex Adversarial Review/);
+  assert.match(output, /^# Cursor Adversarial Review/);
   assert.doesNotMatch(output, /^\{/);
-  assert.match(output, /Codex session ID: thr_123/);
-  assert.match(output, /Resume in Codex: codex resume thr_123/);
+  assert.match(output, /Cursor session ID: thr_123/);
+  assert.match(output, /Resume in Cursor: cursor-agent --resume thr_123/);
 });

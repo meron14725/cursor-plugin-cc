@@ -1,0 +1,8 @@
+{
+  "name": "cursor",
+  "version": "1.0.0",
+  "description": "Use Cursor CLI from Claude Code for read-only code review and adversarial review.",
+  "author": {
+    "name": "meron14725"
+  }
+}

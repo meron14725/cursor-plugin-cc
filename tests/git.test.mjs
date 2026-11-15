@@ -1,9 +1,10 @@
 import fs from "node:fs";
+import os from "node:os";
 import path from "node:path";
 import test from "node:test";
 import assert from "node:assert/strict";
 
-import { collectReviewContext, resolveReviewTarget } from "../plugins/codex/scripts/lib/git.mjs";
+import { collectReviewContext, resolveReviewTarget } from "../plugins/cursor/scripts/lib/git.mjs";
 import { initGitRepo, makeTempDir, run } from "./helpers.mjs";
 
 test("resolveReviewTarget prefers working tree when repo is dirty", () => {
@@ -145,7 +146,24 @@ test("collectReviewContext skips broken untracked symlinks instead of crashing",
 
   assert.equal(target.mode, "working-tree");
   assert.match(context.content, /### broken-link/);
-  assert.match(context.content, /skipped: broken symlink or unreadable file/i);
+  assert.match(context.content, /skipped: symlink/i);
+});
+
+test("collectReviewContext does not read an untracked symlink target", () => {
+  const cwd = makeTempDir();
+  const outside = path.join(os.tmpdir(), `cursor-review-outside-${process.pid}`);
+  fs.writeFileSync(outside, "SECRET-OUTSIDE-BYTES");
+  initGitRepo(cwd);
+  fs.writeFileSync(path.join(cwd, "app.js"), "console.log('v1');\n");
+  run("git", ["add", "app.js"], { cwd });
+  run("git", ["commit", "-m", "init"], { cwd });
+  fs.symlinkSync(outside, path.join(cwd, "linked.js"));
+
+  const context = collectReviewContext(cwd, resolveReviewTarget(cwd, {}));
+  assert.match(context.content, /skipped: symlink/i);
+  assert.doesNotMatch(context.content, /SECRET-OUTSIDE-BYTES/);
+  assert.equal(fs.readFileSync(outside, "utf8"), "SECRET-OUTSIDE-BYTES");
+  fs.rmSync(outside, { force: true });
 });
 
 test("collectReviewContext falls back to lightweight context for larger adversarial reviews", () => {
@@ -166,7 +184,9 @@ test("collectReviewContext falls back to lightweight context for larger adversar
   assert.equal(context.inputMode, "self-collect");
   assert.equal(context.fileCount, 3);
   assert.match(context.collectionGuidance, /lightweight summary/i);
-  assert.match(context.collectionGuidance, /read-only git commands/i);
+  assert.match(context.collectionGuidance, /plugin-generated files outside this workspace/i);
+  assert.match(context.collectionGuidance, /Do not run shell, git/i);
+  assert.doesNotMatch(context.collectionGuidance, /git commands/i);
   assert.doesNotMatch(context.content, /SELF_COLLECT_MARKER_[ABC]/);
   assert.match(context.content, /## Changed Files/);
 });
